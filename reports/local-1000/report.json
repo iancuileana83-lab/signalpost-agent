@@ -1,0 +1,152 @@
+{
+  "run_id": "local-1000",
+  "started_at": "2026-10-12T07:04:25Z",
+  "completed_at": "2026-10-12T07:25:07Z",
+  "inputs": 1000,
+  "distinct_inputs": 1000,
+  "envelopes": 1000,
+  "envelope_state_counts": {
+    "available": 1000
+  },
+  "coverage_by_information_type": {
+    "legal_identity": {
+      "companies_with_available": 1000,
+      "company_coverage_pct": 100.0,
+      "claims": 1000,
+      "state_counts": {
+        "available": 1000
+      }
+    },
+    "annual_accounts": {
+      "companies_with_available": 1000,
+      "company_coverage_pct": 100.0,
+      "claims": 2802,
+      "state_counts": {
+        "available": 1000
+      }
+    },
+    "leadership": {
+      "companies_with_available": 998,
+      "company_coverage_pct": 99.8,
+      "claims": 3956,
+      "state_counts": {
+        "available": 998,
+        "not_available": 2
+      }
+    },
+    "registered_workplace": {
+      "companies_with_available": 772,
+      "company_coverage_pct": 77.2,
+      "claims": 820,
+      "state_counts": {
+        "available": 772,
+        "not_available": 228
+      }
+    },
+    "official_website": {
+      "companies_with_available": 186,
+      "company_coverage_pct": 18.6,
+      "claims": 186,
+      "state_counts": {
+        "available": 186,
+        "not_available": 675,
+        "blocked": 12,
+        "ambiguous": 127
+      }
+    },
+    "public_brand": {
+      "companies_with_available": 160,
+      "company_coverage_pct": 16.0,
+      "claims": 160,
+      "state_counts": {
+        "available": 160,
+        "not_available": 840
+      }
+    },
+    "company_description": {
+      "companies_with_available": 115,
+      "company_coverage_pct": 11.5,
+      "claims": 115,
+      "state_counts": {
+        "available": 115,
+        "not_available": 885
+      }
+    },
+    "company_profile": {
+      "companies_with_available": 102,
+      "company_coverage_pct": 10.2,
+      "claims": 207,
+      "state_counts": {
+        "available": 102,
+        "not_available": 898
+      }
+    },
+    "job_posting": {
+      "companies_with_available": 13,
+      "company_coverage_pct": 1.3,
+      "claims": 51,
+      "state_counts": {
+        "not_available": 987,
+        "available": 13
+      }
+    },
+    "company_news": {
+      "companies_with_available": 67,
+      "company_coverage_pct": 6.7,
+      "claims": 262,
+      "state_counts": {
+        "not_available": 933,
+        "available": 67
+      }
+    },
+    "registry_update": {
+      "companies_with_available": 1000,
+      "company_coverage_pct": 100.0,
+      "claims": 2959,
+      "state_counts": {
+        "available": 1000
+      }
+    }
+  },
+  "claim_availability_totals": {
+    "available": 20764,
+    "not_available": 5437,
+    "blocked": 12,
+    "ambiguous": 127
+  },
+  "operations": {
+    "requests": 13908,
+    "bytes": 296453852,
+    "wall_clock_s": 1242.0,
+    "phase_seconds": {
+      "official_s": 474.2,
+      "total_s": 1242.0
+    },
+    "per_company_runtime_ms": {
+      "p50": 15716,
+      "p95": 39961,
+      "max": 77335
+    },
+    "requests_per_company_mean": 13.9,
+    "workers": 16,
+    "third_party_cost_usd": 0.0
+  },
+  "errors": {
+    "envelopes_with_errors": 0,
+    "by_source": {}
+  },
+  "refresh": {
+    "companies_with_previous": 0,
+    "total_changes": 0
+  },
+  "validation": {
+    "passed": true,
+    "checks": {
+      "one_envelope_per_distinct_input": true,
+      "all_terminal": true,
+      "every_available_claim_has_evidence": true,
+      "evidence_has_url_time_hash": true,
+      "only_six_states": true
+    }
+  }
+}

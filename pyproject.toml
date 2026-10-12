@@ -1,0 +1,25 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "signalpost-agent"
+version = "0.1.0"
+description = "Signalpost agent: researches Norwegian companies from organisation numbers with exact-entity evidence"
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+# Deliberately no third-party runtime dependencies: standard library only.
+dependencies = []
+
+[project.optional-dependencies]
+dev = ["pytest==8.3.4"]
+
+[project.scripts]
+signalpost-agent = "signalpost_agent.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+pythonpath = ["src"]
