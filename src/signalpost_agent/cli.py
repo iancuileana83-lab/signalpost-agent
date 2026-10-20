@@ -190,7 +190,9 @@ def run(args: argparse.Namespace) -> int:
             env = refresh.merge(env, previous.get(org), web_checked=org in web_done)
         except Exception as exc:  # noqa: BLE001 - last-resort terminal envelope
             env = {"schema_version": "signalpost-agent/1", "organisation_number": org, "run": {**run, "terminal_status": "completed"},
-                   "state": "failed", "claims": [], "evidence": [], "changes": [], "history": [], "refresh": {},
+                   "state": "failed", "sections": [], "year_over_year": {"comparable": False, "reason": "envelope assembly failed", "rows": [], "claims": []},
+                   "summary": {"text": "", "sentences": [], "unknowns": ["the profile could not be assembled for this organisation number"]},
+                   "claims": [], "evidence": [], "changes": [], "history": [], "refresh": {},
                    "errors": [{"source": "assembly", "message": f"{type(exc).__name__}: {exc}"}],
                    "operations": {"requests": case.ops.requests, "bytes": case.ops.bytes, "runtime_ms": case.ops.runtime_ms(), "third_party_cost_usd": 0.0}}
         envelopes.append(env)
@@ -245,7 +247,33 @@ def make_report(args, envelopes, orgs, inputs, phase_times, fetcher, started_at,
     claims_with_evidence = all(c["evidence_ids"] for e in envelopes for c in e["claims"] if c["availability"] == "available" and not c.get("stale"))
     valid_states = all(c["availability"] in ("available", "not_available", "blocked", "not_applicable", "ambiguous", "failed")
                        for e in envelopes for c in e["claims"])
+    def receipts_ok(env: dict) -> bool:
+        have = {ev["id"]: ev for ev in env["evidence"]}
+        for c in env["claims"]:
+            if c["availability"] != "available" or c.get("stale"):
+                continue
+            if not c["evidence_ids"] or any(i not in have or not have[i].get("source_url") or not have[i].get("retrieved_at") for i in c["evidence_ids"]):
+                return False
+            if c["field"] == "annual_accounts" and not c.get("reporting_period"):
+                return False
+        return True
+
+    def latest_label_honest(env: dict) -> bool:
+        """A 'Latest filed accounts' sentence is only allowed when the figures cover the registry's latest filing year."""
+        fresh = next((c for c in env["claims"] if c["field"] == "accounts_freshness" and c["availability"] == "available"), None)
+        text = env.get("summary", {}).get("text", "")
+        return not ("Latest filed" in text and (fresh is None or fresh["value"]["status"] != "current"))
+
+    def zero_not_invented(env: dict) -> bool:
+        """registered_employees == 0 must be backed by an evidence span stating a registered count."""
+        have = {ev["id"]: ev for ev in env["evidence"]}
+        return all("harRegistrertAntallAnsatte: False" not in have.get(i, {}).get("claim_span", "")
+                   for c in env["claims"] if c["field"] == "registered_employees" and c["availability"] == "available" for i in c["evidence_ids"])
+
     checks = {
+        "every_available_claim_has_resolvable_source_and_time": all(receipts_ok(e) for e in envelopes),
+        "latest_label_matches_registry_filing_year": all(latest_label_honest(e) for e in envelopes),
+        "no_zero_employees_for_unregistered": all(zero_not_invented(e) for e in envelopes),
         "one_envelope_per_distinct_input": len(envelopes) == len(orgs) == len({e["organisation_number"] for e in envelopes}),
         "all_terminal": all(e["run"]["terminal_status"] == "completed" for e in envelopes),
         "every_available_claim_has_evidence": claims_with_evidence,

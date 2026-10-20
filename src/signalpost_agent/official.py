@@ -96,11 +96,14 @@ def fetch_entity(fetcher: Fetcher, case: Case) -> dict | None:
     else:
         case.claim("registered_address", None, "not_available", [], note="No address in the registry record", section="1")
     employees = body.get("antallAnsatte")
-    if employees is not None:
-        case.claim("registered_employees", employees, "available", [evid(f"antallAnsatte: {employees}")], confidence=1.0, section="3",
+    registered_flag = body.get("harRegistrertAntallAnsatte")
+    if employees is not None and registered_flag is not False:
+        case.claim("registered_employees", employees, "available",
+                   [evid(f"antallAnsatte: {employees}; harRegistrertAntallAnsatte: {registered_flag}")], confidence=1.0, section="3",
                    effective_date=body.get("registreringsdatoAntallAnsatteEnhetsregisteret") or None)
     else:
-        case.claim("registered_employees", None, "not_available", [], note="Employee count not registered (not the same as zero)", section="3")
+        case.claim("registered_employees", None, "not_available", [],
+                   note="Employee count not registered in Enhetsregisteret (unregistered is not the same as zero)", section="3")
     if body.get("registreringsdatoEnhetsregisteret"):
         case.claim("registration_date", body["registreringsdatoEnhetsregisteret"], "available",
                    [evid(f"registreringsdatoEnhetsregisteret: {body['registreringsdatoEnhetsregisteret']}")], confidence=1.0, section="1")
@@ -113,9 +116,32 @@ def fetch_entity(fetcher: Fetcher, case: Case) -> dict | None:
     if body.get("hjemmeside"):
         case.claim("registry_declared_website", body["hjemmeside"], "available", [evid(f"hjemmeside: {body['hjemmeside']}")],
                    confidence=1.0, section="4")
-    if body.get("sisteInnsendteAarsregnskap"):
-        case.notes["latest_filing_year"] = body["sisteInnsendteAarsregnskap"]
+    declared = body.get("sisteInnsendteAarsregnskap")
+    if declared:
+        case.notes["latest_filing_year"] = str(declared)
+        case.notes["latest_filing_evidence"] = evid(f"sisteInnsendteAarsregnskap: {declared}")
+        case.claim("latest_filing_year", str(declared), "available", [case.notes["latest_filing_evidence"]], confidence=1.0, section="2",
+                   note="Year of the latest annual accounts the registry says were filed")
     return body
+
+
+def _freshness(case: Case, newest: str | None, evidence: list[str]) -> None:
+    """State whether the figures we show are the latest filing the registry knows about."""
+    declared = case.notes.get("latest_filing_year")
+    ids = [e for e in [case.notes.get("latest_filing_evidence"), *evidence] if e]
+    if not declared and not newest:
+        return
+    if not declared:
+        status = "unverified"
+    elif not newest:
+        status = "no_figures_in_register"
+    elif newest >= declared:
+        status = "current"
+    else:
+        status = "lagging"
+    case.claim("accounts_freshness", {"status": status, "newest_figures_year": newest, "registry_latest_filing_year": declared},
+               "available", ids, confidence=1.0, section="2",
+               note="current = figures cover the latest filing year; lagging = a newer filing exists but its figures are not in the normalised register")
 
 
 def fetch_accounts(fetcher: Fetcher, case: Case) -> None:
@@ -131,6 +157,7 @@ def fetch_accounts(fetcher: Fetcher, case: Case) -> None:
     records = body if isinstance(body, list) else []
     if not records:
         case.claim("annual_accounts", None, "not_available", [], note="No normalised annual accounts returned for this entity", section="2")
+        _freshness(case, None, [])
         return
     seen: dict[str, dict] = {}
     for record in records:
@@ -167,10 +194,11 @@ def fetch_accounts(fetcher: Fetcher, case: Case) -> None:
         case.claim("annual_accounts", value, "available", [eid], key=f"{period['tilDato']}:{record.get('regnskapstype') or ''}",
                    confidence=1.0, reporting_period=label, section="2")
         years.append(period["tilDato"][:4])
-    case.claim("account_history_years", sorted(set(years), reverse=True), "available",
-               [case.ev(url, "official_annual_accounts", response.retrieved_at, response.sha256, f"periods: {sorted(seen)}",
-                        "brreg_regnskap_periods", license=LICENSE, http_status=200)],
+    history_ev = case.ev(url, "official_annual_accounts", response.retrieved_at, response.sha256, f"periods: {sorted(seen)}",
+                         "brreg_regnskap_periods", license=LICENSE, http_status=200)
+    case.claim("account_history_years", sorted(set(years), reverse=True), "available", [history_ev],
                confidence=1.0, section="2", note="Filing years returned by the normalised accounts endpoint (up to 5 kept)")
+    _freshness(case, max(years) if years else None, [history_ev])
 
 
 def fetch_roles(fetcher: Fetcher, case: Case) -> None:

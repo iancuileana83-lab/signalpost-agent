@@ -66,6 +66,26 @@ is shown on the site, or the legal name is on the site **and** an entity-specifi
 street + postcode, registered person's full name, registry e-mail domain) is shown there. A name match alone
 is reported as `ambiguous` and the value is withheld. Details in `docs/DESIGN.md`.
 
+## Accuracy rules for figures (added in revision 1)
+
+- **"Latest" is verified, not assumed.** The newest accounts period in Regnskapsregisteret is compared with the
+  Enhetsregisteret `sisteInnsendteAarsregnskap`. The claim `accounts_freshness` is `current`, `lagging`,
+  `no_figures_in_register` or `unverified`. Only `current` may be worded "Latest filed accounts (FYxxxx)"; otherwise
+  the summary says which year is shown, which newer filing the registry reports, and lists the gap under
+  "what we could not establish". The fiscal year is always printed, and company-level accounts are preferred over
+  consolidated group accounts for the same period.
+- **Unregistered is not zero.** An employee count is asserted only if `antallAnsatte` is present and
+  `harRegistrertAntallAnsatte` is not false. A frozen-snapshot value of 0 is never asserted either.
+- **Receipts everywhere.** Every summary sentence carries `sources` (URL and retrieval time of each cited
+  claim); the run report fails if any available claim lacks a resolvable source, retrieval time or (for accounts)
+  reporting period.
+- **No narrative trends.** `year_over_year` is figures only: two consecutive 12-month periods, same accounts type
+  and currency, otherwise `comparable: false` with the reason. The only trend sentence restates the revenue
+  numbers and their arithmetic difference. The old "appears to be hiring" inference is gone.
+- **Comparison view.** `--html DIR` writes one page with a card per company plus a side-by-side comparison of up
+  to four ticked companies (accounts year and freshness, revenue, results, equity, assets, employees, website,
+  source link). Envelopes that fail to render show an error card instead of breaking the page.
+
 ## Refresh
 
 `--previous` merges by stable claim key with deterministic evidence ids: re-running on unchanged data yields
@@ -83,11 +103,11 @@ compute. A 1,100-company batch scales linearly (~23 minutes). Use `--deadline-se
 ## 100-company smoke test (random sample of the public universe, seed 20261012)
 
 - Inputs: 100 -> envelopes: 100 (one per distinct input); envelope states: {'available': 100}
-- Wall clock: 128.0 s with 16 workers; 1373 HTTP requests (13.7/company), 37 MB downloaded
-- Per-company active time: p50 15.7 s, p95 34.2 s, max 50.8 s
+- Wall clock: 140.1 s with 16 workers; 1390 HTTP requests (13.9/company), 38 MB downloaded
+- Per-company active time: p50 15.7 s, p95 44.9 s, max 51.2 s
 - Third-party cost: $0.00; companies with at least one logged source error: 0
-- Claim states overall: {'available': 2051, 'not_available': 561, 'ambiguous': 11}
-- Validation: PASSED {'one_envelope_per_distinct_input': True, 'all_terminal': True, 'every_available_claim_has_evidence': True, 'evidence_has_url_time_hash': True, 'only_six_states': True}
+- Claim states overall: {'available': 2258, 'not_available': 555, 'ambiguous': 11, 'blocked': 1}
+- Validation: PASSED {'every_available_claim_has_resolvable_source_and_time': True, 'latest_label_matches_registry_filing_year': True, 'no_zero_employees_for_unregistered': True, 'one_envelope_per_distinct_input': True, 'all_terminal': True, 'every_available_claim_has_evidence': True, 'evidence_has_url_time_hash': True, 'only_six_states': True}
 
 | Information type | Companies with verified data | Coverage | Claims | Other states |
 |---|---:|---:|---:|---|
@@ -95,15 +115,18 @@ compute. A 1,100-company batch scales linearly (~23 minutes). Use `--deadline-se
 | annual_accounts | 100 / 100 | 100.0% | 273 | - |
 | leadership | 100 / 100 | 100.0% | 389 | - |
 | registered_workplace | 73 / 100 | 73.0% | 77 | not_available 27 |
-| official_website | 16 / 100 | 16.0% | 16 | ambiguous 10, not_available 74 |
-| public_brand | 14 / 100 | 14.0% | 14 | not_available 86 |
-| company_description | 11 / 100 | 11.0% | 11 | not_available 89 |
+| official_website | 17 / 100 | 17.0% | 17 | ambiguous 10, not_available 72, blocked 1 |
+| public_brand | 15 / 100 | 15.0% | 15 | not_available 85 |
+| company_description | 12 / 100 | 12.0% | 12 | not_available 88 |
 | company_profile | 10 / 100 | 10.0% | 19 | not_available 90 |
 | job_posting | 1 / 100 | 1.0% | 1 | not_available 99 |
-| company_news | 6 / 100 | 6.0% | 22 | not_available 94 |
-| registry_update | 100 / 100 | 100.0% | 305 | - |
+| company_news | 7 / 100 | 7.0% | 23 | not_available 93 |
+| registry_update | 100 / 100 | 100.0% | 306 | - |
 
-Inputs, report, per-company table and example envelopes: `reports/smoke-100/`.
+Inputs, report, per-company table, example envelopes and a browsable profile page with the comparison view
+(`reports/smoke-100/index.html`): `reports/smoke-100/`. This run (revision 1) used the live registry on 2026-10-20;
+all 100 companies had accounts covering the registry's latest filing year (`accounts_freshness: current`). The
+"lagging" branch did not occur in this sample and is covered by unit tests only.
 Refresh check: a second run on 20 of these companies with `--previous` produced 0 changes and 0 duplicate
 evidence ids.
 

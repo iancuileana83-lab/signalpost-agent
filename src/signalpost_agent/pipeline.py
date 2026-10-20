@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import time
+from datetime import date
 from typing import Any
 
 from . import external, official, web
@@ -49,8 +50,11 @@ def _snapshot_fallback(case: Case, row: dict) -> None:
                    key="1", confidence=0.95, section="1")
     if row.get("website"):
         case.claim("registry_declared_website", row["website"], "available", [eid], confidence=0.95, section="4")
-    if row.get("employees") is not None:
+    if row.get("employees"):  # a snapshot 0 cannot be told apart from "not registered", so it is never asserted
         case.claim("registered_employees", row["employees"], "available", [eid], confidence=0.95, section="3")
+    else:
+        case.claim("registered_employees", None, "not_available", [], section="3",
+                   note="Not registered, or the frozen snapshot has no confirmed count (never read as zero)")
 
 
 def legal_name_of(case: Case) -> str | None:
@@ -151,6 +155,73 @@ def _money(value: Any, currency: str | None) -> str:
         return str(value)
 
 
+YOY_METRICS = (("revenue", "Operating revenue"), ("operating_result", "Operating result"), ("annual_result", "Annual result"),
+               ("total_assets", "Total assets"), ("equity", "Equity"))
+
+
+def _months_between(start: str | None, end: str | None) -> float | None:
+    try:
+        a, b = date.fromisoformat(str(start)[:10]), date.fromisoformat(str(end)[:10])
+    except ValueError:
+        return None
+    return (b - a).days / 30.4375
+
+
+def year_over_year(case: Case, preferred_type: str | None = None) -> dict[str, Any]:
+    """Figures-only comparison of the two latest filings. Never narrates: it only states numbers that are comparable."""
+    accounts = [c for c in case.claims if c["field"] == "annual_accounts" and c["availability"] == "available"
+                and isinstance(c.get("value"), dict) and c["value"].get("period_to")]
+    kinds = sorted({c["value"].get("accounts_type") for c in accounts}, key=lambda k: (k != preferred_type, str(k)))
+    if not kinds:
+        return {"comparable": False, "reason": "no annual accounts available", "rows": [], "claims": []}
+    kind = kinds[0]
+    series = sorted((c for c in accounts if c["value"].get("accounts_type") == kind), key=lambda c: c["value"]["period_to"], reverse=True)
+    if len(series) < 2:
+        return {"comparable": False, "reason": "only one filing year available", "accounts_type": kind, "rows": [], "claims": []}
+    cur, prev = series[0], series[1]
+    cv, pv = cur["value"], prev["value"]
+    base = {"accounts_type": kind, "current_period": f"{cv.get('period_from')}..{cv['period_to']}",
+            "previous_period": f"{pv.get('period_from')}..{pv['period_to']}", "claims": [cur["claim_key"], prev["claim_key"]]}
+    gap = _months_between(pv["period_to"], cv["period_to"])
+    lengths = [_months_between(v.get("period_from"), v["period_to"]) for v in (cv, pv)]
+    if cv.get("currency") != pv.get("currency"):
+        return {**base, "comparable": False, "reason": "different currencies", "rows": []}
+    if gap is None or not 11 <= gap <= 13 or any(n is None or not 11 <= n <= 13 for n in lengths):
+        return {**base, "comparable": False, "reason": "the periods are not two consecutive 12-month years", "rows": []}
+    rows = []
+    for key, label in YOY_METRICS:
+        a, b = cv.get(key), pv.get(key)
+        if a is None or b is None:
+            rows.append({"metric": label, "current": a, "previous": b, "change": None, "change_pct": None, "direction": None})
+            continue
+        change = a - b
+        pct = round(100 * change / b, 1) if b > 0 and a >= 0 else None
+        rows.append({"metric": label, "current": a, "previous": b, "change": change, "change_pct": pct,
+                     "direction": "up" if change > 0 else "down" if change < 0 else "flat"})
+    return {**base, "comparable": True, "reason": None, "currency": cv.get("currency"), "rows": rows}
+
+
+def _preferred_type(case: Case) -> str | None:
+    """Accounts type of the newest filing, company-level first (matches the summary)."""
+    accounts = [c["value"] for c in case.claims if c["field"] == "annual_accounts" and c["availability"] == "available"
+                and isinstance(c.get("value"), dict) and c["value"].get("period_to")]
+    accounts.sort(key=lambda v: (v["period_to"], v.get("accounts_type") != "KONSERN"), reverse=True)
+    return accounts[0].get("accounts_type") if accounts else None
+
+
+def _sources(case: Case, claims: list[dict]) -> list[dict[str, str]]:
+    out: dict[str, dict[str, str]] = {}
+    for claim in claims:
+        for eid in claim.get("evidence_ids", []):
+            ev = case.evidence.get(eid)
+            if not ev:
+                continue
+            url = ev["source_url"]
+            label = url if url.startswith("http") else "frozen registry snapshot supplied by Builderr"
+            out.setdefault(label, {"source": label, "retrieved_at": ev.get("retrieved_at", "")})
+    return list(out.values())
+
+
 def summarize(case: Case) -> dict[str, Any]:
     """Deterministic, claim-backed profile summary: every sentence cites claim keys."""
     by_field: dict[str, list[dict]] = {}
@@ -174,7 +245,7 @@ def summarize(case: Case) -> dict[str, Any]:
             text += f"; registry status: {status['value'].replace('_', ' ')}"
             keys.append(status["claim_key"])
         sentences.append({"text": text + ".", "claims": keys})
-    industries = sorted(by_field.get("industry", []), key=lambda c: c["value"]["rank"])
+    industries = sorted(by_field.get("industry", []), key=lambda c: c["value"].get("rank", 9))
     address, employees = one("registered_address"), one("registered_employees")
     if industries or address or employees:
         parts, keys = [], []
@@ -185,12 +256,28 @@ def summarize(case: Case) -> dict[str, Any]:
             parts.append(f"registered address {address['value']}")
             keys.append(address["claim_key"])
         if employees:
-            parts.append(f"{employees['value']} registered employees")
+            parts.append(f"{employees['value']} employees as registered in Enhetsregisteret")
             keys.append(employees["claim_key"])
         sentences.append({"text": "It reports " + "; ".join(parts) + ".", "claims": keys})
-    accounts = sorted(by_field.get("annual_accounts", []), key=lambda c: c["value"]["period_to"], reverse=True)
+    if not employees:
+        unknowns.append("the employee count is not registered in Enhetsregisteret (unregistered, not zero)")
+    # Same period: company-level accounts before consolidated group accounts.
+    accounts = sorted(by_field.get("annual_accounts", []),
+                      key=lambda c: (c["value"].get("period_to") or "", c["value"].get("accounts_type") != "KONSERN"), reverse=True)
+    fresh, filing = one("accounts_freshness"), one("latest_filing_year")
+    yoy = year_over_year(case, accounts[0]["value"].get("accounts_type") if accounts else None)
     if accounts:
         v = accounts[0]["value"]
+        fy = v["period_to"][:4]
+        status = (fresh or {}).get("value", {}).get("status", "unverified")
+        declared = (fresh or {}).get("value", {}).get("registry_latest_filing_year")
+        kind = " consolidated (group)" if v.get("accounts_type") == "KONSERN" else ""
+        lead = {"current": f"Latest filed{kind} accounts (FY{fy}, matching the registry's latest filing year {declared})",
+                "lagging": f"Most recent{kind} accounts in the normalised register are FY{fy}; the registry reports FY{declared} accounts as filed "
+                           "but their figures are not available here, so these are not the latest",
+                }.get(status, f"Most recent{kind} accounts in the normalised register (FY{fy}; the registry gave no latest filing year to check against)")
+        if status == "lagging":
+            unknowns.append(f"FY{declared} accounts are filed according to the registry, but the figures are not in the accounts register")
         bits = []
         if v.get("revenue") is not None:
             bits.append(f"operating revenue {_money(v['revenue'], v.get('currency'))}")
@@ -201,10 +288,19 @@ def summarize(case: Case) -> dict[str, Any]:
         if v.get("equity") is not None:
             bits.append(f"equity {_money(v['equity'], v.get('currency'))}")
         if bits:
-            sentences.append({"text": f"Latest filed accounts in the normalised register (period {v['period_from']} to {v['period_to']}): "
-                                      + ", ".join(bits) + ".", "claims": [accounts[0]["claim_key"]]})
+            keys = [accounts[0]["claim_key"]] + [c["claim_key"] for c in (fresh, filing) if c]
+            sentences.append({"text": f"{lead} (period {v['period_from']} to {v['period_to']}): " + ", ".join(bits) + ".", "claims": keys})
+        rev = next((r for r in yoy["rows"] if r["metric"] == "Operating revenue" and r["change"] is not None), None) if yoy["comparable"] else None
+        if rev:
+            pct = f" ({rev['change_pct']:+.1f}%)" if rev["change_pct"] is not None else ""
+            move = "unchanged" if rev["direction"] == "flat" else f"{rev['direction']} {_money(abs(rev['change']), yoy.get('currency'))}{pct}"
+            sentences.append({"text": f"Operating revenue was {_money(rev['current'], yoy.get('currency'))} in the period ending {yoy['current_period'][-10:]} "
+                                      f"against {_money(rev['previous'], yoy.get('currency'))} in the period ending {yoy['previous_period'][-10:]}: {move}.",
+                              "claims": yoy["claims"]})
     else:
         unknowns.append("no annual accounts were returned by the accounts register")
+        if fresh and fresh["value"]["status"] == "no_figures_in_register":
+            unknowns.append(f"the registry reports FY{fresh['value']['registry_latest_filing_year']} accounts as filed, but no figures are in the accounts register")
     roles = by_field.get("leadership", [])
     ceo = [c for c in roles if c["value"]["role_code"] == "DAGL"]
     chair = [c for c in roles if c["value"]["role_code"] == "LEDE"]
@@ -226,7 +322,8 @@ def summarize(case: Case) -> dict[str, Any]:
     site = one("official_website")
     if site:
         proof = {"org_number_on_site": "organisation number shown on the site", "registry_declared_website": "declared in the registry",
-                 "registry_contact_details_match": "name and registry contact details match"}[site["value"]["identity_proof"]]
+                 "registry_contact_details_match": "name and registry contact details match"}.get(
+                     (site["value"] or {}).get("identity_proof"), "identity checked against the registry record")
         sentences.append({"text": f"Official website {site['value']['url']} ({proof}).", "claims": [site["claim_key"]]})
         brand = one("public_brand")
         if brand and brand["value"]["differs_from_legal_name"]:
@@ -240,8 +337,8 @@ def summarize(case: Case) -> dict[str, Any]:
                           "claims": [p["claim_key"] for p in profiles]})
     jobs = by_field.get("job_posting", [])
     if jobs:
-        sentences.append({"text": f"{len(jobs)} job posting(s) found in the checked sources (e.g. \"{jobs[0]['value']['title']}\"), "
-                                  "so the company appears to be hiring.", "claims": [j["claim_key"] for j in jobs[:5]]})
+        sentences.append({"text": f"{len(jobs)} job posting(s) found in the checked sources (e.g. \"{jobs[0]['value'].get('title')}\"); "
+                                  "this is not a complete count of the company's vacancies.", "claims": [j["claim_key"] for j in jobs[:5]]})
     else:
         unknowns.append("no job postings were found in the checked sources (this does not prove the company is not hiring)")
     activity = sorted(by_field.get("public_activity", []), key=lambda c: c.get("effective_date") or "", reverse=True)
@@ -253,6 +350,9 @@ def summarize(case: Case) -> dict[str, Any]:
         v = activity[0]["value"]
         sentences.append({"text": f"Latest dated register activity: {v['title']} on {v['date'][:10]} (no company news found).",
                           "claims": [activity[0]["claim_key"]]})
+    by_key = {c["claim_key"]: c for c in case.claims}
+    for s in sentences:  # a receipt for every sentence: where each cited claim was read, and when
+        s["sources"] = _sources(case, [by_key[k] for k in s["claims"] if k in by_key])
     return {"text": " ".join(s["text"] for s in sentences), "sentences": sentences, "unknowns": unknowns}
 
 
@@ -279,6 +379,7 @@ def build_envelope(case: Case, run: dict[str, Any], outcome: dict[str, Any] | No
         "state": overall,
         "sections": sections,
         "summary": summarize(case),
+        "year_over_year": year_over_year(case, _preferred_type(case)),
         "claims": sorted(claims, key=lambda c: (c.get("section") or "9", c["claim_key"])),
         "evidence": sorted(case.evidence.values(), key=lambda e: e["id"]),
         "changes": [], "history": [], "refresh": {},
