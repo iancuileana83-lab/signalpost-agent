@@ -264,3 +264,40 @@ def test_headlines_reject_menu_labels_and_strip_the_site_suffix():
     assert clean_headline("Aker Solutions", "akersolutions") == ""  # the site name alone
     assert clean_headline("RE-Source 2021 | Statkraft", "statkraft") == "RE-Source 2021"
     assert clean_headline("Endelig sertifisert", "melbuhotell") == "Endelig sertifisert"
+
+
+# ----- 4. job postings: menu labels are not postings ------------------------------------------------------
+def _jobs(routes, careers_body):
+    from signalpost_agent.web import extract_jobs
+    home = html("Fjord Bygg", '<a href="/karriere">Karriere</a>')
+    fetcher = SiteFake({"https://fjordbygg.example/": home, "https://fjordbygg.example/karriere": html("Karriere", careers_body), **routes})
+    case = case_named("FJORD BYGG AS")
+    result = extract_jobs(fetcher, case, ctx_for("https://fjordbygg.example/", home), "FJORD BYGG AS")
+    return case, result, fetcher
+
+
+def test_careers_menu_links_are_not_job_postings():
+    menu = ('<a href="/karriere/what-we-offer">What we offer</a> <a href="/karriere/graduate-programme">Graduate programme</a>'
+            '<a href="/karriere/faq">Frequently asked questions</a> <a href="/karriere/stillinger/ansatte-historier">Misak ville jobbe gratis for oss</a>')
+    plain = html("Graduate programme", "<p>Apply for our programme</p>")
+    case, result, _ = _jobs({"https://fjordbygg.example/karriere/graduate-programme": plain,
+                             "https://fjordbygg.example/karriere/stillinger/ansatte-historier": plain}, menu)
+    assert not claims(case, "job_posting") and result["checked"] and result["count"] == 0
+
+
+def test_linked_ad_page_with_jobposting_json_ld_is_a_posting():
+    ad = html("Tømrer", '<script type="application/ld+json">{"@type":"JobPosting","title":"Tømrer","datePosted":"2026-09-01",'
+                        '"hiringOrganization":{"name":"Fjord Bygg AS"}}</script>')
+    other_org = html("Fremmed", '<script type="application/ld+json">{"@type":"JobPosting","title":"Sjåfør","hiringOrganization":{"name":"Annet Selskap AS"}}</script>')
+    links = '<a href="/stillinger/tomrer">Tømrer til Bergen</a> <a href="/stillinger/sjafor">Sjåfør til Oslo</a>'
+    case, _r, _f = _jobs({"https://fjordbygg.example/stillinger/tomrer": ad, "https://fjordbygg.example/stillinger/sjafor": other_org}, links)
+    got = claims(case, "job_posting")
+    assert [(c["value"]["title"], c["value"]["date_posted"]) for c in got] == [("Tømrer", "2026-09-01")]
+    assert case.evidence[got[0]["evidence_ids"][0]]["source_url"] == "https://fjordbygg.example/stillinger/tomrer"
+
+
+def test_ats_hosted_ad_links_count_but_the_ats_root_does_not():
+    links = ('<a href="https://fjordbygg.webcruiter.no/">Se alle våre stillinger</a>'
+             '<a href="https://fjordbygg.webcruiter.no/Main/Recruit/Public/4711">Prosjektleder bygg</a>')
+    case, _r, _f = _jobs({}, links)
+    assert [c["value"]["title"] for c in claims(case, "job_posting")] == ["Prosjektleder bygg"]

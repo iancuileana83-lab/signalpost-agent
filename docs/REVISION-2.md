@@ -41,8 +41,16 @@ Sitemap entries only say where to look: each article page must itself carry `og:
 publish date, otherwise nothing is emitted.
 
 Known limits: a site that publishes its date only as visible text yields no news (by design); the handle test cannot accept a
-genuine profile whose name does not contain the company name unless the site declares it in JSON-LD; the job-posting extractor
-is unchanged and still lists some careers-page menu labels as postings.
+genuine profile whose name does not contain the company name unless the site declares it in JSON-LD; a company that lists
+vacancies only as plain links to its own non-structured pages shows no postings from its site (NAV Arbeidsplassen ads, matched by
+exact organisation number, are unaffected).
+
+**Job postings** (`extract_jobs`, added after the first push). A careers-page link is never a posting by itself. A posting is
+(a) a JobPosting JSON-LD block on the careers page, (b) a link to a same-site page that itself carries JobPosting JSON-LD whose
+hiring organisation is this company, or (c) a link to an ATS-hosted ad (Webcruiter, Teamtailor, ...) with an ad-like URL, not the
+ATS root. Menu labels, programme pages, FAQs and employee stories are not postings. Live runs: Equinor ASA 11 -> 0, KIWI Norge AS
+7 -> 0 (menu items and employee stories), Lerøy Seafood AS 12 -> 0 (menu pages such as "Fagområder", "Mennesker"); no genuine posting
+was lost in the 60-company sample.
 
 ## Before / after on real companies (live run, 2026-10-24)
 
@@ -64,6 +72,6 @@ organisation number; the earlier run hit a transient fetch failure); Kunst og Ka
 Trafikkskole AS a WordPress comment-feed item -> none; Lerøy Seafood AS 4+ `lastmod`-dated items ("Annual report ... 2019" dated
 2026-10-13) -> articles with their own publish dates (2021-2025); Melbu Hotell AS unchanged (feed `pubDate`).
 
-Tests: `tests/test_ownership.py` (18 tests, fake fetcher, no network): copyright / impressum owners, subsidiary and org-number
+Tests: `tests/test_ownership.py` (21 tests, fake fetcher, no network): copyright / impressum owners, subsidiary and org-number
 exceptions, brand-owner lookup, group site yields no social / news / jobs, social handle rules, `sameAs`, Atom `updated`,
-identical-timestamp feeds, comment feeds, sitemap `lastmod`, undated and listing pages, menu-label headlines.
+identical-timestamp feeds, comment feeds, sitemap `lastmod`, undated and listing pages, menu-label headlines, careers menu links vs JSON-LD / ATS ad pages.

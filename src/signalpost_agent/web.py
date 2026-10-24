@@ -679,30 +679,41 @@ def extract_jobs(fetcher: Fetcher, case: Case, ctx: SiteContext, legal_name: str
                         continue
                     jobs.append({**job, "method": "json_ld_jobposting", "confidence": 0.95})
         if not jobs:
-            cap = 0
+            # A careers page is full of menu links ("What we offer", "Graduate programme", "FAQ"): a link is never a posting
+            # by itself. Only an ATS-hosted ad URL, or a same-site page that itself carries JobPosting JSON-LD, is one.
+            opened = 0
             for link in page.links:
                 text = link.text.strip()
                 absu = page.abs(link.href).split("#")[0]
-                host = (urllib.parse.urlsplit(absu).hostname or "").lower()
-                if not (8 <= len(text) <= 90) or JOB_STOP.search(text) or absu == resp.final_url or NOT_JOB_RE.search(text):
-                    continue
-                ats = any(h in host for h in ATS_HOSTS)
-                if not (ats or (ctx.same_site(absu) and JOB_PATH_RE.search(urllib.parse.urlsplit(absu).path))):
-                    continue
-                if urllib.parse.urlsplit(absu).path.rstrip("/") == urllib.parse.urlsplit(resp.final_url).path.rstrip("/") and not ats:
+                parts = urllib.parse.urlsplit(absu)
+                if not (8 <= len(text) <= 90) or JOB_STOP.search(text) or NOT_JOB_RE.search(text) or absu == resp.final_url:
                     continue
                 if any(j["url"] == absu for j in jobs):
                     continue
-                jobs.append({"title": text, "date_posted": None, "valid_through": None, "hiring_organization": None,
-                             "location": None, "url": absu, "method": "careers_page_link", "confidence": 0.6})
-                cap += 1
-                if cap >= 12:
+                if any(h in (parts.hostname or "").lower() for h in ATS_HOSTS):
+                    if len([seg for seg in parts.path.split("/") if seg]) >= 2 or re.search(r"(?:^|[?&])(?:id|jobid|adid|ad|job)=", parts.query, re.I):
+                        jobs.append({"title": text, "date_posted": None, "valid_through": None, "hiring_organization": None,
+                                     "location": None, "url": absu, "method": "ats_ad_link", "confidence": 0.6})
+                elif ctx.same_site(absu) and JOB_PATH_RE.search(parts.path) and opened < 8:
+                    opened += 1
+                    ad = fetcher.get(absu, case.ops)
+                    ad_page = _html_page(ad)
+                    if ad_page is None:
+                        continue
+                    for item in ad_page.jsonld:
+                        job = _job_from_ld(item, ad_page) if "JobPosting" in ld_types(item) else None
+                        org_name = (job or {}).get("hiring_organization")
+                        if job and not (org_name and not name_matches(norm(org_name), tokens) and norm(org_name) not in norm(legal_name)):
+                            jobs.append({**job, "url": ad.final_url, "method": "linked_ad_page_json_ld", "confidence": 0.9, "_resp": ad})
+                            break
+                if len(jobs) >= 12:
                     break
         for job in jobs[:15]:
             span = job["title"] + (f" (datePosted {job['date_posted']})" if job["date_posted"] else "")
-            eid = case.ev(resp.final_url, "company_owned", resp.retrieved_at, resp.sha256, span, job["method"], http_status=200,
+            src = job.get("_resp", resp)
+            eid = case.ev(src.final_url, "company_owned", src.retrieved_at, src.sha256, span, job["method"], http_status=200,
                           effective_date=job["date_posted"])
-            value = {k: v for k, v in job.items() if k not in ("method", "confidence")}
+            value = {k: v for k, v in job.items() if k not in ("method", "confidence", "_resp")}
             case.claim("job_posting", value, "available", [eid], key=job["url"], confidence=job["confidence"],
                        effective_date=job["date_posted"], section="5", note="Posting listed on the company's own careers page")
         return {"checked": True, "count": len(jobs[:15]), "page": resp.final_url}
