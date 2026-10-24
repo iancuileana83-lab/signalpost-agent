@@ -89,7 +89,7 @@ def web_phase(fetcher: Fetcher, case: Case, entity: dict | None, wikidata: dict 
     if found:
         ctx = found["ctx"]
         outcome["site"] = True
-        for step in (lambda: web.extract_brand(case, ctx, name), lambda: web.extract_social(case, ctx)):
+        for step in (lambda: web.extract_brand(case, ctx, name), lambda: web.extract_social(case, ctx, name)):
             try:
                 step()
             except Exception as exc:  # noqa: BLE001
@@ -140,7 +140,8 @@ def web_phase(fetcher: Fetcher, case: Case, entity: dict | None, wikidata: dict 
         case.claim("public_activity", None, "not_available", [], key="news",
                    note=("Checked, no dated company news found in: " + "; ".join(checked)) if checked else "No verified website to read news from",
                    section="5")
-    if not have_profiles and not any(c["field"] == "company_profile" and c["availability"] in ("ambiguous",) for c in case.claims):
+    if not any(c["field"] == "company_profile" and (c["availability"] in ("available", "ambiguous") or c["claim_key"] == "company_profile:any")
+               for c in case.claims):
         case.claim("company_profile", None, "not_available", [], key="any",
                    note="No company-owned social profile links found on a verified site or Wikidata item", section="4")
     return outcome
@@ -329,7 +330,13 @@ def summarize(case: Case) -> dict[str, Any]:
         if brand and brand["value"]["differs_from_legal_name"]:
             sentences.append({"text": f"The company presents itself as \"{brand['value']['name']}\" on its own site.", "claims": [brand["claim_key"]]})
     else:
-        unknowns.append("no official website could be verified for this exact entity")
+        group = next((c for c in case.claims if c["field"] == "official_website" and isinstance(c.get("value"), dict)
+                      and c["value"].get("site_scope") == "group_site"), None)
+        if group:
+            unknowns.append(f"the only website found, {group['value']['candidate_url']}, is not this company's own site "
+                            f"({group['value']['reason']}); it is not published, and neither are its social links, news or jobs")
+        else:
+            unknowns.append("no official website could be verified for this exact entity")
     profiles = by_field.get("company_profile", [])
     if profiles:
         sentences.append({"text": "Company-owned profiles linked from its site or Wikidata: "

@@ -14,6 +14,7 @@ from datetime import datetime, timedelta, timezone
 from email.utils import parsedate_to_datetime
 from typing import Any
 
+from . import official
 from .htmlx import Page, find_org_numbers, ld_types, parse_html
 from .http import Fetcher, Response
 from .model import Case
@@ -182,6 +183,102 @@ def _page_proof(page: Page, org: str) -> str | None:
     return None
 
 
+# ----- whose site is it? ---------------------------------------------------------
+_W = r"[A-ZÆØÅ0-9][\w&'’.\-]*"
+ENTITY_RE = re.compile(rf"({_W}(?: (?:{_W}|og|and|&)){{0,4}}) (AS|ASA|GmbH|AB|A/S|ApS|Oy|Oyj|Ltd|Limited|Inc|B\.V\.|BV|S\.A\.|AG|LLC|SE|NUF)(?!\w)")
+COPYRIGHT_RE = re.compile(r"(?:©|\(c\)|copyright)\s*(?:\d{4}\s*(?:[-–]\s*\d{4})?\s*[,.:\-]?\s*)?(?:by\s+)?(.{0,90})", re.I)
+DOMAIN_LIKE = re.compile(r"^(?:www\.)?[\w-]+(?:\.[\w-]+)+$")
+
+
+def _org_near(text: str, start: int, end: int, org: str) -> bool:
+    return org in find_org_numbers(text[max(0, start - 200): end + 200])
+
+
+OWNER_CONTEXT_RE = re.compile(r"behandlingsansvarlig|dataansvarlig|data controller|controller|ansvarlig utgiver|utgiver|publisher|operated by|"
+                              r"drevet av|driftet av|eies av|eid av|owned by|company information|selskapsinformasjon|impressum|"
+                              r"legal notice|provider|tjenesteleverandør|nettstedet (?:eies|drives)|this (?:web)?site is", re.I)
+
+
+def foreign_owner(page: Page, legal_name: str, org: str) -> tuple[str, str] | None:
+    """Another legal entity that this page names as its owner/publisher and that shares the company's first name word
+    (REMA 1000 AS vs REMA 1000 NORGE AS, Color Line GmbH vs Color Line AS, Aker Solutions ASA vs AS).
+    Evidence: a © line (any page), or a legal page (impressum, privacy, contact) naming it in an owner / controller / publisher
+    context. A mere mention does not count, nor does a longer name that starts with ours (a subsidiary), nor a mention that
+    sits next to our own organisation number."""
+    ours = norm(legal_name)
+    own_tokens = name_tokens(legal_name)
+    first = (own_tokens or [""])[0]
+    if len(first) < 3:
+        return None
+    text = page.text
+    found: list[tuple[str, int, bool]] = []  # (entity name, absolute start, is a © statement)
+    for m in COPYRIGHT_RE.finditer(text):
+        lead = len(m.group(1)) - len(m.group(1).lstrip())
+        e = ENTITY_RE.match(m.group(1).lstrip())
+        if e:
+            found.append((e.group(0), m.start(1) + lead, True))
+    if LEGAL_RE.search(page.url) or LEGAL_RE.search(page.title):
+        found += [(e.group(0), e.start(), False) for e in ENTITY_RE.finditer(text)
+                  if OWNER_CONTEXT_RE.search(text[max(0, e.start() - 100): e.start()])]
+    for raw, start, is_copyright in found:
+        name = raw.strip(" .,")
+        core = name_tokens(ENTITY_RE.match(name).group(1)) if ENTITY_RE.match(name) else name_tokens(name)  # without the legal form
+        if norm(name) == ours or not core or core[0] != first:
+            continue
+        if not is_copyright and len(core) > len(own_tokens) and core[:len(own_tokens)] == own_tokens:
+            continue  # "Equinor Asset Management AS" on the Equinor ASA site: a subsidiary, not the owner
+        if _org_near(text, start, start + len(name), org):
+            continue
+        return name, re.sub(r"\s+", " ", text[max(0, start - 40): start + len(name) + 40]).strip()
+    return None
+
+
+def site_brand_tokens(ctx: "SiteContext", legal_name: str) -> list[str]:
+    """How the site names itself, when that name is (part of) the legal name; otherwise []."""
+    home = ctx.home
+    candidates = [home.meta.get("og:site_name", "")]
+    candidates += [str(i.get("name") or "") for i in home.jsonld if ld_types(i) & {"Organization", "Corporation", "LocalBusiness"}]
+    candidates += [seg for seg in re.split(r"\s[|\-–—·]\s", home.title)]
+    candidates.append(ctx.host.split(".")[0].replace("-", " "))
+    ours = "".join(name_tokens(legal_name))
+    for raw in candidates:
+        raw = raw.strip()
+        if not raw or DOMAIN_LIKE.match(raw):
+            continue
+        tokens = name_tokens(raw)
+        joined = "".join(tokens)
+        if len(joined) >= 4 and joined in ours:
+            return tokens
+    return []
+
+
+def assess_site_scope(fetcher: Fetcher, case: Case, ctx: "SiteContext", legal_name: str, proof: str, source: str,
+                      branded: bool) -> dict[str, Any]:
+    """Is this the company's own site, or the site of a parent group / brand owner? Any negative sign means 'group'."""
+    for url, (page, resp) in ctx.pages.items():
+        hit = foreign_owner(page, legal_name, case.org)
+        if hit:
+            name, span = hit
+            return {"scope": "group", "owner": name, "reason": f'the site names another legal entity, "{name}", as its owner or publisher',
+                    "evidence": (url, "company_owned", resp.sha256, span, "other_legal_owner_named_on_site")}
+    if proof == "registry_contact_details_match" and not branded:
+        return {"scope": "group", "owner": None, "reason": "the site's own name does not carry the company name, so it is a brand or group site",
+                "evidence": (ctx.home_resp.final_url, "company_owned", ctx.home_resp.sha256, ctx.home.title[:200], "site_brand_differs_from_legal_name")}
+    if proof != "org_number_on_site" and source != "registry":
+        # The site brand is only part of the legal name ("Statkraft" vs "Statkraft Energi AS"): who else is registered under that name?
+        brand = site_brand_tokens(ctx, legal_name)
+        if brand and brand != name_tokens(legal_name) and len("".join(brand)) >= 4:
+            for other_org, other_name in official.search_names(fetcher, case, " ".join(brand)):
+                if other_org != case.org and name_tokens(other_name) == brand:
+                    return {"scope": "group", "owner": f"{other_name} ({other_org})",
+                            "reason": f'the site is branded "{" ".join(brand)}", the exact name of another registered entity, {other_name} ({other_org})',
+                            "evidence": (official.NAME_SEARCH.split("?")[0], "official_registry", None, f"{other_org} {other_name}",
+                                         "brreg_exact_name_of_other_entity")}
+    basis = {"org_number_on_site": "organisation number shown on the site", "registry_declared_website": "declared in the registry"}.get(
+        proof, "name and registry contact details match, and the site is branded with the company name")
+    return {"scope": "own", "basis": basis + "; no other legal entity named as the site's owner"}
+
+
 def verify_candidate(fetcher: Fetcher, case: Case, url: str, org: str, tokens: list[str], source: str,
                      entity: dict | None = None) -> dict[str, Any]:
     """Fetch a candidate and decide identity. Returns {state, ctx, proof, ...}."""
@@ -322,6 +419,7 @@ def resolve_website(fetcher: Fetcher, case: Case, entity: dict | None, legal_nam
     del pre
 
     best_ambiguous: dict[str, Any] | None = None
+    best_group: dict[str, Any] | None = None
     blocked: dict[str, Any] | None = None
     attempts: list[str] = []
     for source, url in candidates:
@@ -330,6 +428,12 @@ def resolve_website(fetcher: Fetcher, case: Case, entity: dict | None, legal_nam
         if result["state"] == "verified":
             response: Response = result["response"]
             ctx: SiteContext = result["ctx"]
+            scope = assess_site_scope(fetcher, case, ctx, legal_name, result["proof"], source, result.get("branded", True))
+            if scope["scope"] == "group":
+                attempts[-1] += ":group_site"
+                if best_group is None:
+                    best_group = {**scope, "origin": ctx.origin, "retrieved_at": response.retrieved_at}
+                continue
             methods = {"org_number_on_site": "org_number_exact_match_in_page_text",
                        "registry_declared_website": "registry_declared_website",
                        "registry_contact_details_match": "name_plus_registry_contact_details_match"}
@@ -340,10 +444,9 @@ def resolve_website(fetcher: Fetcher, case: Case, entity: dict | None, legal_nam
                 ev_ids.append(case.ev(f"https://data.brreg.no/enhetsregisteret/api/enheter/{org}", "official_registry",
                                       response.retrieved_at, None, f"hjemmeside: {entity['hjemmeside']}",
                                       "brreg_enheter_json_field", license="NLOD 2.0"))
-            value = {"url": ctx.origin, "candidate_source": source, "identity_proof": result["proof"]}
-            if result["proof"] == "registry_contact_details_match" and not result.get("branded", True):
-                value["scope_note"] = "site name does not clearly carry the legal name; may be a group or brand site"
-            case.claim("official_website", value, "available", ev_ids, confidence={"org_number_on_site": 0.99, "registry_declared_website": 0.9}.get(result["proof"], 0.85 if result.get("branded", True) else 0.7),
+            value = {"url": ctx.origin, "candidate_source": source, "identity_proof": result["proof"],
+                     "site_scope": "own", "scope_basis": scope["basis"]}
+            case.claim("official_website", value, "available", ev_ids, confidence={"org_number_on_site": 0.99, "registry_declared_website": 0.9}.get(result["proof"], 0.85),
                        section="4")
             ctx.proof = result["proof"]  # type: ignore[attr-defined]
             return {"ctx": ctx, "source": source}
@@ -351,7 +454,14 @@ def resolve_website(fetcher: Fetcher, case: Case, entity: dict | None, legal_nam
             blocked = result
         if result["state"] == "ambiguous" and best_ambiguous is None:
             best_ambiguous = result
-    if best_ambiguous:
+    if best_group:
+        src, cls, sha, span, method = best_group["evidence"]
+        eid = case.ev(src, cls, best_group["retrieved_at"], sha, span, method, http_status=200 if cls == "company_owned" else None)
+        case.claim("official_website", {"candidate_url": best_group["origin"], "site_scope": "group_site", "owner": best_group["owner"],
+                                        "reason": best_group["reason"]}, "ambiguous", [eid], confidence=0.9, section="4",
+                   note=f"{best_group['origin']} is not this company's own site: {best_group['reason']}. "
+                        "Not published as its website; the site's social links, news and jobs are not used either")
+    elif best_ambiguous:
         case.claim("official_website", None, "ambiguous", [],
                    note=f"Candidate {best_ambiguous['url']} resembles the company name but does not show organisation number {org}; not published",
                    section="4")
@@ -422,14 +532,81 @@ def classify_social(href: str) -> tuple[str, str] | None:
     return None
 
 
-def extract_social(case: Case, ctx: SiteContext) -> None:
+# A handle that carries the company name is still not the company's when it also carries a country, group or foreign
+# legal-form marker (colorline_deutschland, ColorLineGmbH, orkla-group). Short markers only count as the whole remainder.
+FOREIGN_MARKERS = ("deutschland", "germany", "tyskland", "sverige", "sweden", "danmark", "denmark", "suomi", "finland", "global",
+                   "group", "gruppen", "international", "holding", "konsern", "europe", "gmbh", "corporate")
+SHORT_FOREIGN_MARKERS = {"ab", "oy", "sa", "ag", "uk", "usa", "se", "dk", "de", "fi", "inc", "ltd", "aps", "bv"}
+NEUTRAL_REMAINDER = ("norge", "norway", "norsk", "norwegian", "official", "offisiell", "offisielle", "asa", "as", "nor", "no")
+# Social links that belong to the web agency or the site theme, never to the company
+THIRD_PARTY_HANDLES = {"wordpress", "wix", "squarespace", "shopify", "webflow", "elementor", "themeforest", "envato", "facebook", "meta",
+                       "instagram", "linkedin", "youtube", "twitter", "x", "tiktok", "google", "visma", "mailchimp", "hubspot"}
+
+
+def _handle(platform: str, clean: str) -> str:
+    path = urllib.parse.urlsplit(clean).path.strip("/")
+    parts = path.split("/")
+    if platform == "linkedin" and len(parts) >= 2:
+        return parts[1]
+    if platform in ("youtube",) and parts and parts[0] in ("channel", "c", "user") and len(parts) >= 2:
+        return ("channel:" if parts[0] == "channel" else "") + parts[1]
+    return parts[0].lstrip("@") if parts else ""
+
+
+def social_mismatch(platform: str, clean: str, anchors: list[str], declared: set[str]) -> str | None:
+    """None when the profile can be tied to the company, else the reason it is not published."""
+    handle = _handle(platform, clean)
+    key = re.sub(r"[^a-z0-9]", "", norm(handle))
+    if not key or handle.startswith("channel:") or key.isdigit():
+        return "opaque profile id, cannot be tied to the company"
+    if key in THIRD_PARTY_HANDLES:
+        return "profile of a platform, theme vendor or agency"
+    anchor = next((a for a in sorted(anchors, key=len, reverse=True) if a in key), None)
+    if anchor is None and clean.lower() not in declared:
+        return "profile name does not carry the company name"
+    rest = key.replace(anchor, "", 1) if anchor else key
+    for word in NEUTRAL_REMAINDER:
+        rest = rest.replace(word, "") if len(word) > 3 else ("" if rest == word else rest)
+    marker = next((m for m in FOREIGN_MARKERS if m in rest), None) or (rest if rest in SHORT_FOREIGN_MARKERS else None)
+    if marker:
+        return f'profile name carries "{marker}": it belongs to another entity, a country branch or the group'
+    return None
+
+
+def declared_profiles(ctx: SiteContext, legal_name: str) -> set[str]:
+    """Profiles the site itself declares as its organisation's identity: sameAs of an Organization whose name is the company's."""
+    out: set[str] = set()
+    tokens = name_tokens(legal_name)
+    for item in ctx.home.jsonld:
+        if not ld_types(item) & {"Organization", "Corporation", "LocalBusiness", "Store", "ProfessionalService"}:
+            continue
+        if not name_matches(norm(str(item.get("name") or item.get("legalName") or "")), tokens):
+            continue
+        same_as = item.get("sameAs")
+        for link in ([same_as] if isinstance(same_as, str) else same_as or []):
+            cls = classify_social(str(link))
+            if cls:
+                out.add(cls[1].lower())
+    return out
+
+
+def extract_social(case: Case, ctx: SiteContext, legal_name: str) -> None:
+    """Social profiles linked from the company's own site, kept only when each one can be tied to this company."""
+    anchors = [a for a in {re.sub(r"[^a-z0-9]", "", ctx.host.split(".")[0]), "".join(name_tokens(legal_name))} if len(a) >= 4]
+    declared = declared_profiles(ctx, legal_name)
     found: dict[str, dict[str, list[tuple[str, str, Response]]]] = {}
+    rejected: dict[str, str] = {}
     for url, (page, resp) in ctx.pages.items():
         for link in page.links:
             cls = classify_social(page.abs(link.href))
-            if cls:
-                platform, clean = cls
-                found.setdefault(platform, {}).setdefault(clean.lower(), []).append((clean, url, resp))
+            if not cls:
+                continue
+            platform, clean = cls
+            why = social_mismatch(platform, clean, anchors, declared)
+            if why:
+                rejected.setdefault(clean.lower(), f"{clean}: {why}")
+                continue
+            found.setdefault(platform, {}).setdefault(clean.lower(), []).append((clean, url, resp))
     for platform in SOCIAL:
         options = found.get(platform)
         if not options:
@@ -444,7 +621,11 @@ def extract_social(case: Case, ctx: SiteContext) -> None:
         eid = case.ev(page_url, "company_owned", resp.retrieved_at, resp.sha256, f"link to {clean}", "outbound_link_from_verified_site", http_status=200)
         case.claim("company_profile", {"platform": platform, "url": clean, "linked_from": page_url}, "available", [eid],
                    key=platform, confidence=0.9, section="4",
-                   note="Profile URL taken from the verified company site; the platform itself was not scraped")
+                   note="Profile name carries the company name and no group, country or agency marker; the platform itself was not scraped")
+    if rejected and not found:
+        case.claim("company_profile", None, "not_available", [], key="any", section="4",
+                   note=("Social links on the site were not published because they cannot be tied to this company: "
+                         + "; ".join(sorted(rejected.values())[:6]))[:400])
 
 
 def _job_from_ld(item: dict, page: Page) -> dict | None:
@@ -528,7 +709,67 @@ def extract_jobs(fetcher: Fetcher, case: Case, ctx: SiteContext, legal_name: str
     return {"checked": False, "count": 0, "page": None}
 
 
+# ----- news: only real, dated posts ---------------------------------------------------
+# Menu labels and section names are not headlines; a sitemap lastmod, an Atom <updated> or a feed build date is not a publish date.
+GENERIC_TITLES = {"news", "nyheter", "aktuelt", "blogg", "blog", "presse", "press", "pressemeldinger", "pressemelding", "press releases",
+                  "press release", "pressrom", "presserom", "newsroom", "media", "mediesenter", "arkiv", "archive", "news archive",
+                  "nyhetsarkiv", "all news", "alle nyheter", "latest news", "siste nyheter", "stories", "artikler", "articles",
+                  "home", "hjem", "forside", "les mer", "read more", "se alle", "vis alle", "om oss", "about us", "kontakt", "contact"}
+LISTING_SEGMENTS = {"news", "nyheter", "aktuelt", "blog", "blogg", "presse", "press", "pressemeldinger", "pressemelding", "arkiv", "archive",
+                    "news-archive", "nyhetsarkiv", "newsroom", "pressrom", "presserom", "media", "artikler", "articles", "stories",
+                    "nyhetsbrev", "page"}
+NOT_NEWS_PATH = re.compile(r"/(?:produkt|produkter|product|products|shop|nettbutikk|butikk|tilbud|vare|varer|kategori|category|tag|pris|priser|bestill|kampanje)(?:/|$)", re.I)
+ARTICLE_LD = {"Article", "NewsArticle", "BlogPosting", "Report", "TechArticle", "ScholarlyArticle"}
+PUBLISHED_META = ("article:published_time", "og:article:published_time", "datepublished", "pubdate", "dc.date.issued", "dcterms.created",
+                  "dcterms.issued", "sailthru.date")
+PUBLISHED_TIME_HINT = re.compile(r"datepublished|publish|posted|entry-date|post-date|pubdate")
+# Theme demo posts and comment-feed items are not company news
+PLACEHOLDER_RE = re.compile(r"hello,? world|hei,? verden|hallo,? verden|lorem ipsum|your (?:awesome|attractive|intriguing|[a-z]+) post title|"
+                            r"sample (?:post|page)|eksempel ?(?:innlegg|side)|just another wordpress|^kommentar til |^comment on |^svar til ", re.I)
+SITE_SUFFIX_RE = re.compile(r"\s[|·]\s|\s[–—-]\s(?=[^–—-]*$)")
+
+
+def clean_headline(title: str, host_label: str) -> str:
+    """Drop a trailing ' | Site name' and return the headline, or '' when it is only a menu label or the site name."""
+    title = re.sub(r"\s+", " ", title or "").strip()
+    parts = [p for p in SITE_SUFFIX_RE.split(title) if p.strip()]
+    if len(parts) > 1 and len(parts[-1]) <= 25 and norm(parts[-1]).replace(" ", "") in host_label:
+        title = " | ".join(parts[:-1])
+    words = norm(title).split()
+    if not words or norm(title) in GENERIC_TITLES or norm(title).replace(" ", "") == host_label:
+        return ""
+    if len(words) < 2 and len(title) < 12 or PLACEHOLDER_RE.search(title):
+        return ""
+    return title[:200]
+
+
+def news_url_ok(url: str, ctx: SiteContext) -> bool:
+    """A post lives on the company's own site and is not the homepage, a section index, a listing page or a product page."""
+    parts = urllib.parse.urlsplit(url)
+    segments = [seg for seg in parts.path.split("/") if seg]
+    if not url or not ctx.same_site(url) or not segments or "page=" in parts.query or "paged=" in parts.query or "comment" in parts.fragment:
+        return False
+    return segments[-1].lower() not in LISTING_SEGMENTS and not NOT_NEWS_PATH.search(parts.path)
+
+
+def page_published(page: Page) -> tuple[str | None, bool]:
+    """(publish date, is_article) read from the article page itself. dateModified, <updated> and sitemap lastmod are never used."""
+    is_article = page.meta.get("og:type", "").lower() == "article"
+    date = None
+    for key in PUBLISHED_META:
+        date = date or parse_date(page.meta.get(key))
+    for item in page.jsonld:
+        if ld_types(item) & ARTICLE_LD:
+            is_article = True
+            date = date or parse_date(str(item.get("datePublished") or ""))
+    for tag in page.times:
+        if PUBLISHED_TIME_HINT.search(tag.hint):
+            date = date or parse_date(tag.datetime)
+    return date, is_article
+
+
 def _parse_feed(text: str) -> list[dict]:
+    """Feed items with a real publish date: RSS pubDate, Atom published, dc:date. Atom <updated> is a modification date: ignored."""
     items: list[dict] = []
     try:
         root = ET.fromstring(text)
@@ -542,18 +783,21 @@ def _parse_feed(text: str) -> list[dict]:
         for child in el:
             ctag = child.tag.rsplit("}", 1)[-1]
             if ctag == "link":
-                d["link"] = child.attrib.get("href") or (child.text or "")
-            elif ctag in ("title", "pubDate", "published", "updated", "date", "guid"):
+                d.setdefault("link", child.attrib.get("href") or (child.text or "").strip())
+            elif ctag in ("title", "pubDate", "published", "date", "guid"):
                 d.setdefault(ctag, (child.text or "").strip())
-        date = parse_date(d.get("pubDate") or d.get("published") or d.get("updated") or d.get("date"))
-        if d.get("title") and date:
-            items.append({"title": re.sub(r"\s+", " ", d["title"])[:200], "date": date, "url": (d.get("link") or d.get("guid") or "").strip()})
+        raw = d.get("pubDate") or d.get("published") or d.get("date")
+        date = parse_date(raw)
+        link = (d.get("link") or (d.get("guid") if str(d.get("guid", "")).startswith("http") else "") or "").strip()
+        if d.get("title") and date and link:
+            items.append({"title": re.sub(r"\s+", " ", d["title"])[:200], "date": date, "url": link, "raw_date": raw})
     return items
 
 
 def extract_activity(fetcher: Fetcher, case: Case, ctx: SiteContext) -> dict[str, Any]:
-    """Dated company news from RSS/Atom, then sitemap lastmod, then <time> tags. Returns {'checked','count'}."""
+    """Dated company news from the site's own feed, else from article pages listed in its sitemap. Returns {'checked','count'}."""
     origin = ctx.origin
+    label = re.sub(r"[^a-z0-9]", "", ctx.host.split(".")[0])
     feeds: list[str] = []
     for _t, href, _title in ctx.home.alternates:
         feeds.append(ctx.home.abs(href))
@@ -562,23 +806,32 @@ def extract_activity(fetcher: Fetcher, case: Case, ctx: SiteContext) -> dict[str
         feeds = [urllib.parse.urljoin(origin, p) for p in ("feed/", "rss.xml", "feed.xml")]
     emitted = 0
     for url in feeds[:3]:
-        if not ctx.same_site(url):
+        if not ctx.same_site(url) or "comment" in urllib.parse.urlsplit(url).path.lower():
             continue
         resp = fetcher.get(url, case.ops, accept="application/rss+xml,application/atom+xml,application/xml,text/xml;q=0.9,*/*;q=0.5")
         if resp.status != 200:
             continue
         checked = True
         items = _parse_feed(resp.text)
-        for item in sorted(items, key=lambda i: i["date"], reverse=True)[:6]:
-            eid = case.ev(resp.final_url, "company_owned", resp.retrieved_at, resp.sha256, f"{item['date']} {item['title']}",
-                          "rss_atom_item", http_status=200, effective_date=item["date"])
-            case.claim("public_activity", {"kind": "company_news", "title": item["title"], "date": item["date"], "url": item["url"] or resp.final_url},
-                       "available", [eid], key="news:" + (item["url"] or item["title"]), confidence=0.95,
-                       effective_date=item["date"], section="5")
+        if len(items) >= 3 and len({i["raw_date"] for i in items}) == 1:
+            continue  # one identical timestamp on every item is the feed's build time, not publish dates
+        seen: set[str] = set()
+        for item in sorted(items, key=lambda i: i["date"], reverse=True):
+            title = clean_headline(item["title"], label)
+            if not title or not news_url_ok(item["url"], ctx) or item["url"] in seen:
+                continue
+            seen.add(item["url"])
+            eid = case.ev(resp.final_url, "company_owned", resp.retrieved_at, resp.sha256, f"{item['date']} {title}",
+                          "rss_atom_item_publish_date", http_status=200, effective_date=item["date"])
+            case.claim("public_activity", {"kind": "company_news", "title": title, "date": item["date"], "url": item["url"],
+                                           "date_basis": "feed_publish_date"},
+                       "available", [eid], key="news:" + item["url"], confidence=0.95, effective_date=item["date"], section="5")
             emitted += 1
+            if emitted >= 6:
+                break
         if emitted:
             return {"checked": True, "count": emitted}
-    # sitemap lastmod
+    # Sitemap: it only says where articles are. Each article page must carry its own publish date and look like an article.
     sitemap_urls = fetcher.robots_sitemaps(origin) or [urllib.parse.urljoin(origin, "sitemap.xml")]
     entries: list[tuple[str, str]] = []
     queue = sitemap_urls[:2]
@@ -605,30 +858,23 @@ def extract_activity(fetcher: Fetcher, case: Case, ctx: SiteContext) -> dict[str
             elif tag == "url":
                 loc = next((c.text for c in el if c.tag.rsplit("}", 1)[-1] == "loc"), None)
                 mod = next((c.text for c in el if c.tag.rsplit("}", 1)[-1] == "lastmod"), None)
-                if loc and mod and NEWS_RE.search(urllib.parse.urlsplit(loc).path) and urllib.parse.urlsplit(loc).path.count("/") >= 2:
-                    date = parse_date(mod)
-                    if date:
-                        entries.append((date, loc.strip()))
-    for date, loc in sorted(set(entries), reverse=True)[:4]:
-        if not ctx.same_site(loc):
-            continue
+                if loc and NEWS_RE.search(urllib.parse.urlsplit(loc).path) and news_url_ok(loc.strip(), ctx):
+                    entries.append((parse_date(mod) or "", loc.strip()))  # lastmod only orders which pages to open
+    for _order, loc in sorted(set(entries), reverse=True)[:10]:
+        if emitted >= 6:
+            break
         resp = fetcher.get(loc, case.ops)
         page = _html_page(resp)
         if page is None:
             continue
-        title = page.meta.get("og:title") or page.title
-        published = parse_date(page.meta.get("article:published_time") or page.meta.get("datepublished"))
-        for item in page.jsonld:
-            if not published and item.get("datePublished"):
-                published = parse_date(str(item["datePublished"]))
-        if not title:
+        published, is_article = page_published(page)
+        title = clean_headline(page.meta.get("og:title") or page.title, label)
+        if not (published and is_article and title):
             continue
-        use_date = published or date
-        eid = case.ev(resp.final_url, "company_owned", resp.retrieved_at, resp.sha256, f"{use_date} {title[:150]}",
-                      "page_published_time" if published else "sitemap_lastmod", http_status=200, effective_date=use_date)
-        case.claim("public_activity", {"kind": "company_news", "title": title[:200], "date": use_date, "url": resp.final_url,
-                                       "date_basis": "page_published_time" if published else "sitemap_lastmod"},
-                   "available", [eid], key="news:" + resp.final_url, confidence=0.85 if published else 0.6,
-                   effective_date=use_date, section="5")
+        eid = case.ev(resp.final_url, "company_owned", resp.retrieved_at, resp.sha256, f"{published} {title[:150]}",
+                      "article_page_publish_date", http_status=200, effective_date=published)
+        case.claim("public_activity", {"kind": "company_news", "title": title, "date": published, "url": resp.final_url,
+                                       "date_basis": "article_publish_date"},
+                   "available", [eid], key="news:" + resp.final_url, confidence=0.85, effective_date=published, section="5")
         emitted += 1
     return {"checked": checked, "count": emitted}

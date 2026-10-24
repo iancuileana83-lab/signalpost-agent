@@ -26,6 +26,7 @@ class Link:
 class TimeTag:
     datetime: str
     index: int
+    hint: str = ""  # itemprop + class of the tag: tells a publish date from an event or update date
 
 
 @dataclass
@@ -74,7 +75,7 @@ class _Extractor(HTMLParser):
             self._anchor = Link(a["href"].strip(), "", a.get("rel", ""), self._i)
             self.page.links.append(self._anchor)
         elif tag == "time" and a.get("datetime"):
-            self.page.times.append(TimeTag(a["datetime"].strip(), self._i))
+            self.page.times.append(TimeTag(a["datetime"].strip(), self._i, f'{a.get("itemprop", "")} {a.get("class", "")}'.lower()))
         elif tag == "iframe" and a.get("src"):
             self.page.iframes.append(a["src"])
         elif tag == "script":

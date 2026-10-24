@@ -66,6 +66,28 @@ is shown on the site, or the legal name is on the site **and** an entity-specifi
 street + postcode, registered person's full name, registry e-mail domain) is shown there. A name match alone
 is reported as `ambiguous` and the value is withheld. Details in `docs/DESIGN.md`.
 
+## Own site, own profiles, real news (added in revision 2)
+
+Identity (above) says the site is *about* this entity. Revision 2 also asks whose site it is, and an empty field is
+always preferred to a wrong one. Full rules and before/after runs: `docs/REVISION-2.md`.
+
+- **Website scope.** A verified site is published as the company's own only if no other legal entity is named as its
+  owner: a `©` line (any page) or an owner / controller / publisher statement on a legal page (impressum, privacy,
+  contact) that names an entity sharing our first name word but not our exact name (`REMA 1000 AS` vs `REMA 1000 NORGE AS`,
+  `Color Line GmbH`, `Aker Solutions ASA`), unless our own organisation number sits next to it; or, for sites not proven
+  by organisation number or registry declaration, when the site brand is the exact name of another registered entity
+  (`Statkraft` vs `STATKRAFT AS`). Then `official_website` is `ambiguous` with `site_scope: group_site`, the owner and the
+  evidence, and the site's brand, description, social links, jobs and news are **not** read.
+- **Social profiles.** Taken only from a verified own site, and each one must carry the company name (domain label or
+  legal name) in its handle, with no country, group or legal-form marker (`colorline_deutschland`, `ColorLineGmbH`,
+  `orkla-group`), not belong to a platform, theme vendor or agency, and not be an opaque id. A profile the site declares in
+  the `sameAs` of its own Organization JSON-LD is also accepted. Rejected links are listed in the `not_available` note.
+- **News.** A post needs its own publish date (RSS `pubDate`, Atom `published`, `dc:date`, `article:published_time`,
+  JSON-LD `datePublished`, `<time itemprop=datePublished>`). Sitemap `lastmod`, Atom `updated`, `dateModified` and a
+  feed whose items all share one timestamp are never dates. It also needs a headline (not a menu label such as "All News",
+  not the site name, not a theme placeholder), a URL on the company's own site that is not a section index, listing or
+  product page, and, when found via the sitemap, `og:type=article` or an Article JSON-LD type.
+
 ## Accuracy rules for figures (added in revision 1)
 
 - **"Latest" is verified, not assumed.** The newest accounts period in Regnskapsregisteret is compared with the

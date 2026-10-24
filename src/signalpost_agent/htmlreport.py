@@ -77,7 +77,10 @@ def compare_row(env: dict) -> dict[str, Any]:
         row["Accounts year"] = "no accounts figures in the register"
     row["Registered employees"] = _num(emp["value"]) if emp else "not registered (not zero)"
     site = _first(env, "official_website")
-    row["Verified website"] = (site.get("value") or {}).get("url", "") if site else "none verified"
+    group = next((c for c in env.get("claims", []) if c.get("field") == "official_website" and isinstance(c.get("value"), dict)
+                  and c["value"].get("site_scope") == "group_site"), None)
+    row["Verified website"] = (site.get("value") or {}).get("url", "") if site else (
+        f"none verified (group site {group['value'].get('candidate_url')} withheld)" if group else "none verified")
     return row
 
 

@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import urllib.parse
 from typing import Any
 
 from .http import Fetcher, Response
@@ -13,6 +14,7 @@ ROLES = ENTITY + "/roller"
 SUBUNITS = BASE + "/enhetsregisteret/api/underenheter?overordnetEnhet={org}&size=100"
 UPDATES = BASE + "/enhetsregisteret/api/oppdateringer/enheter?organisasjonsnummer={org}&size=5"
 ACCOUNTS = BASE + "/regnskapsregisteret/regnskap/{org}"
+NAME_SEARCH = BASE + "/enhetsregisteret/api/enheter?navn={name}&size=20"
 LICENSE = "NLOD 2.0"
 JSON_ACCEPT = "application/json"
 
@@ -52,6 +54,14 @@ def status_claim_state(response: Response) -> str:
     if response.status in (401, 403, -1):
         return "blocked"
     return "failed"
+
+
+def search_names(fetcher: Fetcher, case: Case, name: str) -> list[tuple[str, str]]:
+    """(organisation number, legal name) of registry entities whose name resembles `name`; [] when the search fails."""
+    response = fetch(fetcher, case, NAME_SEARCH.format(name=urllib.parse.quote(name)))
+    body = _json(response) if response.status == 200 else None
+    rows = _get(body, "_embedded", "enheter") if isinstance(body, dict) else None
+    return [(str(r.get("organisasjonsnummer")), str(r.get("navn"))) for r in rows or [] if isinstance(r, dict) and r.get("navn")]
 
 
 def fetch_entity(fetcher: Fetcher, case: Case) -> dict | None:
