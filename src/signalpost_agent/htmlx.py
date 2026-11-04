@@ -7,6 +7,8 @@ import urllib.parse
 from dataclasses import dataclass, field
 from html.parser import HTMLParser
 
+FOOTER_RE = re.compile(r"(?:^|[\s_-])footer(?:$|[\s_-])|colophon", re.I)
+FOOTER_TAGS = ("footer", "div", "section", "nav", "aside", "ul")
 ORG_RE = re.compile(r"(?<!\d)(\d{3})[ . ]?(\d{3})[ . ]?(\d{3})(?!\d)")
 
 
@@ -20,6 +22,7 @@ class Link:
     text: str
     rel: str = ""
     index: int = 0
+    in_footer: bool = False
 
 
 @dataclass
@@ -40,6 +43,7 @@ class Page:
     times: list[TimeTag] = field(default_factory=list)
     text: str = ""
     iframes: list[str] = field(default_factory=list)
+    has_footer: bool = False  # the page has a footer section (<footer>, role=contentinfo or a footer/colophon container)
 
     def abs(self, href: str) -> str:
         return urllib.parse.urljoin(self.url, href)
@@ -56,10 +60,19 @@ class _Extractor(HTMLParser):
         self._anchor: Link | None = None
         self._text: list[str] = []
         self._i = 0
+        self._footer_tag = ""
+        self._footer_depth = 0
 
     def handle_starttag(self, tag, attrs):
         self._i += 1
         a = {k: (v or "") for k, v in attrs}
+        if self._footer_depth:
+            if tag == self._footer_tag:
+                self._footer_depth += 1
+        elif tag in FOOTER_TAGS and (tag == "footer" or a.get("role", "").lower() == "contentinfo"
+                                     or FOOTER_RE.search(a.get("id", "") + " " + a.get("class", ""))):
+            self._footer_tag, self._footer_depth = tag, 1
+            self.page.has_footer = True
         if tag == "title":
             self._in_title = True
         elif tag == "meta":
@@ -72,7 +85,7 @@ class _Extractor(HTMLParser):
                     "application/rss+xml", "application/atom+xml", "application/feed+json"):
                 self.page.alternates.append((a["type"].lower(), a["href"], a.get("title", "")))
         elif tag == "a" and a.get("href"):
-            self._anchor = Link(a["href"].strip(), "", a.get("rel", ""), self._i)
+            self._anchor = Link(a["href"].strip(), "", a.get("rel", ""), self._i, self._footer_depth > 0)
             self.page.links.append(self._anchor)
         elif tag == "time" and a.get("datetime"):
             self.page.times.append(TimeTag(a["datetime"].strip(), self._i, f'{a.get("itemprop", "")} {a.get("class", "")}'.lower()))
@@ -90,8 +103,11 @@ class _Extractor(HTMLParser):
             self._text.append("\n")
 
     def handle_endtag(self, tag):
+        if self._footer_depth and tag == self._footer_tag:
+            self._footer_depth -= 1
         if tag == "title":
             self._in_title = False
+            self._text.append(chr(10))  # the title is its own line, never glued to the first text of the body
         elif tag == "a":
             self._anchor = None
         elif tag == "script":

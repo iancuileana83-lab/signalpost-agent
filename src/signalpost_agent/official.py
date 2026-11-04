@@ -12,7 +12,6 @@ BASE = "https://data.brreg.no"
 ENTITY = BASE + "/enhetsregisteret/api/enheter/{org}"
 ROLES = ENTITY + "/roller"
 SUBUNITS = BASE + "/enhetsregisteret/api/underenheter?overordnetEnhet={org}&size=100"
-UPDATES = BASE + "/enhetsregisteret/api/oppdateringer/enheter?organisasjonsnummer={org}&size=5"
 ACCOUNTS = BASE + "/regnskapsregisteret/regnskap/{org}"
 NAME_SEARCH = BASE + "/enhetsregisteret/api/enheter?navn={name}&size=20"
 LICENSE = "NLOD 2.0"
@@ -288,31 +287,3 @@ def fetch_workplaces(fetcher: Fetcher, case: Case) -> None:
                    [case.ev(url, "official_subunits", response.retrieved_at, response.sha256, f"totalElements: {total}",
                             "brreg_underenheter_page", license=LICENSE, http_status=200)], confidence=1.0, section="3",
                    note="Only the first 30 workplaces are listed as claims")
-
-
-def fetch_updates(fetcher: Fetcher, case: Case) -> None:
-    """Dated registry changes (public activity from an official source)."""
-    url = UPDATES.format(org=case.org)
-    response = fetch(fetcher, case, url)
-    if response.status != 200:
-        if response.status not in (404, 410):
-            case.error("brreg_updates", f"{url}: {response.status} {response.error}", severity="warning")
-        return
-    body = _json(response)
-    pages = _get(body, "page", "totalPages") or 1
-    if pages > 1:  # entries are ascending by id: the newest are on the last page
-        last = fetch(fetcher, case, url + f"&page={pages - 1}")
-        if last.status == 200:
-            response, body = last, _json(last)
-            url = url + f"&page={pages - 1}"
-    rows = _get(body, "_embedded", "oppdaterteEnheter") or []
-    for row in sorted(rows, key=lambda r: r.get("dato") or "", reverse=True)[:5]:
-        if row.get("organisasjonsnummer") != case.org or not row.get("dato"):
-            continue
-        value = {"kind": "registry_update", "change_type": row.get("endringstype"), "date": row["dato"],
-                 "update_id": row.get("oppdateringsid"), "title": f"Register entry {row.get('endringstype') or 'update'}"}
-        eid = case.ev(url, "official_registry", response.retrieved_at, response.sha256,
-                      f"oppdateringsid {row.get('oppdateringsid')} {row.get('dato')} {row.get('endringstype')}",
-                      "brreg_oppdateringer_json_field", effective_date=row["dato"], license=LICENSE, http_status=200)
-        case.claim("public_activity", value, "available", [eid], key=f"registry:{row.get('oppdateringsid')}",
-                   confidence=1.0, effective_date=row["dato"], section="5")

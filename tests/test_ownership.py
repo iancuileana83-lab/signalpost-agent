@@ -20,6 +20,8 @@ class SiteFake:
 
     def get(self, url, ops, **kwargs):
         self.asked.append(url)
+        if kwargs.get("data") is not None:
+            self.posted = getattr(self, "posted", []) + [(url, kwargs["data"])]
         body = self.routes.get(url)
         if body is None:
             return Response(url, url, 404, retrieved_at=NOW)
@@ -122,7 +124,7 @@ def test_group_site_yields_no_social_news_or_jobs_for_the_company():
     fetcher = SiteFake({"https://acme.example/": html("Acme", body, '<link rel="alternate" type="application/rss+xml" href="/feed/">'),
                         "https://acme.example/feed/": feed})
     case = case_named("ACME NORGE AS")
-    web_phase(fetcher, case, {"hjemmeside": "acme.example"}, None, use_nav=False, max_guesses=0)
+    web_phase(fetcher, case, {"hjemmeside": "acme.example"}, None, max_guesses=0)
     assert not claims(case, "company_profile") and not claims(case, "job_posting") and not claims(case, "public_activity")
     assert "https://acme.example/feed/" not in fetcher.asked and "https://acme.example/karriere" not in fetcher.asked
     text = " ".join(summarize(case)["unknowns"])
@@ -147,7 +149,7 @@ def test_extract_social_keeps_only_profiles_that_belong_to_the_company():
     footer = ('<a href="https://www.facebook.com/fjordbygg">f</a> <a href="https://www.instagram.com/fjordbygg_sverige">i</a>'
               '<a href="https://www.linkedin.com/company/fjord-group-holding">l</a> <a href="https://www.facebook.com/webbyraaet">agency</a>'
               '<a href="https://www.linkedin.com/company/fjordbygg">l2</a> <a href="https://www.youtube.com/channel/UCabc123">y</a>')
-    ctx = ctx_for("https://fjordbygg.example/", html("Fjord Bygg", footer))
+    ctx = ctx_for("https://fjordbygg.example/", html("Fjord Bygg", "<footer>" + footer + "</footer>"))
     case = case_named("FJORD BYGG AS")
     extract_social(case, ctx, "FJORD BYGG AS")
     got = {c["value"]["platform"]: c["value"]["url"] for c in claims(case, "company_profile")}
@@ -155,18 +157,18 @@ def test_extract_social_keeps_only_profiles_that_belong_to_the_company():
 
 
 def test_all_links_rejected_leaves_the_field_empty_and_says_why():
-    ctx = ctx_for("https://fjordbygg.example/", html("Fjord Bygg", '<a href="https://www.instagram.com/fjordbygg_deutschland">i</a>'))
+    ctx = ctx_for("https://fjordbygg.example/", html("Fjord Bygg", '<footer><a href="https://www.instagram.com/fjordbygg_deutschland">i</a></footer>'))
     case = case_named("FJORD BYGG AS")
     extract_social(case, ctx, "FJORD BYGG AS")
     assert not claims(case, "company_profile")
     note = claims(case, "company_profile", "not_available")[0]["note"]
-    assert "fjordbygg_deutschland" in note and "deutschland" in note
+    assert "fjordbygg_deutschland" in note and "deutschland" in note and note.startswith("Footer social links were not published")
 
 
 def test_site_declared_profile_is_accepted_even_without_the_name_in_the_handle():
     ld = ('<script type="application/ld+json">{"@type":"Organization","name":"Fjord Bygg","sameAs":'
           '["https://www.facebook.com/byggmesterne.i.fjorden"]}</script>')
-    page = html("Fjord Bygg", '<a href="https://www.facebook.com/byggmesterne.i.fjorden">f</a>' + ld)
+    page = html("Fjord Bygg", '<footer><a href="https://www.facebook.com/byggmesterne.i.fjorden">f</a></footer>' + ld)
     ctx = ctx_for("https://fjordbygg.example/", page)
     case = case_named("FJORD BYGG AS")
     extract_social(case, ctx, "FJORD BYGG AS")
@@ -182,12 +184,12 @@ def _item(title, link, date="Mon, 01 Sep 2025 10:00:00 +0200"):
     return f"<item><title>{title}</title><link>{link}</link><pubDate>{date}</pubDate></item>"
 
 
-def _news(routes, home_head='<link rel="alternate" type="application/rss+xml" href="/feed/">', sitemaps=()):
-    home = html("Fjord Bygg", "<p>hei</p>", home_head)
+def _news(routes, home_head='<link rel="alternate" type="application/rss+xml" href="/feed/">', sitemaps=(), home_body="<p>hei</p>"):
+    home = html("Fjord Bygg", home_body, home_head)
     fetcher = SiteFake({"https://fjordbygg.example/": home, **routes}, sitemaps)
     ctx = ctx_for("https://fjordbygg.example/", home)
     case = case_named("FJORD BYGG AS")
-    result = extract_activity(fetcher, case, ctx)
+    result = extract_activity(fetcher, case, ctx, "FJORD BYGG AS")
     return case, result
 
 
@@ -236,7 +238,7 @@ SITEMAP = ('<?xml version="1.0"?><urlset xmlns="http://www.sitemaps.org/schemas/
 
 
 def test_sitemap_lastmod_is_never_a_publish_date():
-    dated = html("Ny hall i Bergen | Fjord Bygg", "<p>x</p>", '<meta property="og:type" content="article">'
+    dated = html("Ny hall i Bergen | Fjord Bygg", "<p>Fjord Bygg har reist en ny hall i Bergen.</p>", '<meta property="og:type" content="article">'
                  '<meta property="og:title" content="Ny hall i Bergen | Fjord Bygg">'
                  '<meta property="article:published_time" content="2025-08-14T10:00:00+02:00">'
                  '<meta property="article:modified_time" content="2026-10-19T10:00:00+02:00">')
@@ -301,3 +303,303 @@ def test_ats_hosted_ad_links_count_but_the_ats_root_does_not():
              '<a href="https://fjordbygg.webcruiter.no/Main/Recruit/Public/4711">Prosjektleder bygg</a>')
     case, _r, _f = _jobs({}, links)
     assert [c["value"]["title"] for c in claims(case, "job_posting")] == ["Prosjektleder bygg"]
+
+
+# ----- 5. only articles that name the company; register change records are not news ---------------------------
+def test_feed_post_must_name_the_company_in_headline_description_or_article():
+    feed = _rss(
+        _item("Fjord Bygg vinner kontrakt i Bergen", "https://fjordbygg.example/nyheter/a/"),  # headline names it
+        "<item><title>Ny hall reist i havneomradet</title><link>https://fjordbygg.example/nyheter/b/</link><pubDate>Mon, 02 Jun 2025 10:00:00 +0200</pubDate>"
+        "<description>&lt;p&gt;Fjord Bygg leverte hallen.&lt;/p&gt;</description></item>",  # description names it
+        _item("Tips til varmepumpe", "https://fjordbygg.example/nyheter/c/", "Mon, 03 Jun 2025 10:00:00 +0200"),  # article body names it
+        _item("Tips til sparing", "https://fjordbygg.example/nyheter/d/", "Mon, 04 Jun 2025 10:00:00 +0200"),  # names nobody
+        _item("Hva er en kontrakt", "https://fjordbygg.example/nyheter/e/", "Mon, 05 Jun 2025 10:00:00 +0200"))  # only site chrome names it
+    menu = "<nav>Fjord Bygg AS</nav>"
+    case, _ = _news({"https://fjordbygg.example/feed/": feed,
+                     "https://fjordbygg.example/nyheter/c/": html("Tips | Fjord Bygg", menu + "<p>Fjord Bygg anbefaler varmepumpe.</p>"),
+                     "https://fjordbygg.example/nyheter/d/": html("Tips | Fjord Bygg", menu + "<p>Spar strom hjemme.</p>"),
+                     "https://fjordbygg.example/nyheter/e/": html("Hva | Fjord Bygg", menu + "<p>Kontrakt betyr avtale.</p>")},
+                    home_body=menu + "<p>hei</p>")
+    titles = sorted(c["value"]["title"] for c in claims(case, "public_activity"))
+    assert titles == ["Fjord Bygg vinner kontrakt i Bergen", "Ny hall reist i havneomradet", "Tips til varmepumpe"]
+
+
+def test_sitemap_article_that_does_not_name_the_company_is_dropped():
+    other = html("Generell artikkel | Fjord Bygg", "<p>Om vaer og vind.</p>", '<meta property="og:type" content="article">'
+                 '<meta property="article:published_time" content="2025-08-14T10:00:00+02:00">')
+    sm = SITEMAP.replace("nyheter/ny-hall-i-bergen/", "nyheter/generell/")
+    case, result = _news({"https://fjordbygg.example/sitemap.xml": sm, "https://fjordbygg.example/nyheter/generell/": other}, home_head="")
+    assert not claims(case, "public_activity") and result["count"] == 0
+
+
+def test_register_change_records_are_never_emitted_and_viewer_shows_date_next_to_each_article():
+    from signalpost_agent import official
+    from signalpost_agent.htmlreport import _news_list
+    from signalpost_agent.pipeline import build_envelope
+    assert not hasattr(official, "fetch_updates")
+    feed = _rss(_item("Fjord Bygg vinner kontrakt i Bergen", "https://fjordbygg.example/nyheter/a/", "Mon, 06 Oct 2025 09:00:00 +0200"))
+    case, _ = _news({"https://fjordbygg.example/feed/": feed})
+    env = build_envelope(case, {"run_id": "r", "started_at": "a", "completed_at": "b"}, None, True, True)
+    assert {c["value"]["kind"] for c in env["claims"] if c["field"] == "public_activity" and c["availability"] == "available"} == {"company_news"}
+    news = _news_list(env)
+    assert '<time datetime="2025-10-06">2025-10-06</time> <a href="https://fjordbygg.example/nyheter/a/"' in news
+    assert "Endring" not in news and "Ukjent" not in news and "Register entry" not in news
+    assert _news_list({"claims": [{"field": "public_activity", "availability": "available",
+                                   "value": {"kind": "registry_update", "title": "Register entry Endring", "date": "2025-01-01"}}]}) == ""
+
+
+# ----- 6. step 2: social links only from the footer, jobs only from the site's own careers page ----------------
+FB, IG = "https://www.facebook.com/fjordbygg", "https://www.instagram.com/fjordbygg"
+
+
+def _social(page_body):
+    ctx = ctx_for("https://fjordbygg.example/", html("Fjord Bygg", page_body))
+    case = case_named("FJORD BYGG AS")
+    extract_social(case, ctx, "FJORD BYGG AS")
+    return case
+
+
+def test_social_links_are_read_only_from_the_footer():
+    case = _social(f'<header><a href="{IG}">ig</a></header><main><a href="{FB}">fb</a></main>'
+                   '<footer><a href="https://www.linkedin.com/company/fjordbygg">in</a></footer>')
+    assert [c["value"]["url"] for c in claims(case, "company_profile")] == ["https://www.linkedin.com/company/fjordbygg"]
+
+
+def test_footer_is_recognised_by_tag_role_or_class_and_nesting_ends_at_its_close():
+    for opener, closer in (("<footer>", "</footer>"), ('<div role="contentinfo">', "</div>"), ('<div class="site-footer"><div class="x">', "</div></div>"),
+                           ('<section id="page_footer">', "</section>")):
+        case = _social(f'{opener}<a href="{FB}">fb</a>{closer}<p><a href="{IG}">ig</a></p>')
+        assert [c["value"]["platform"] for c in claims(case, "company_profile")] == ["facebook"], opener  # the link after the footer is out
+
+
+def test_nothing_found_says_which_case_applies():
+    none_in_footer = claims(_social(f'<main><a href="{FB}">fb</a></main><footer><p>Org.nr 914 778 271</p></footer>'), "company_profile", "not_available")
+    assert len(none_in_footer) == 1 and none_in_footer[0]["note"].startswith("No social media links found in the footer of https://fjordbygg.example/")
+    no_footer = claims(_social(f'<main><a href="{FB}">fb</a></main>'), "company_profile", "not_available")
+    assert "has no footer section" in no_footer[0]["note"]
+
+
+def test_wikidata_profiles_are_not_a_social_source():
+    from signalpost_agent import external
+    assert not hasattr(external, "wikidata_profiles")
+
+
+def _phase(routes, name="FJORD BYGG AS", registry="fjordbygg.example"):
+    fetcher = SiteFake(routes)
+    case = case_named(name)
+    web_phase(fetcher, case, {"hjemmeside": registry}, None, max_guesses=0)
+    return case, fetcher
+
+
+def test_no_careers_page_on_the_site_or_on_a_linked_job_platform_is_reported_honestly():
+    home = html("Fjord Bygg", '<p>Org.nr 914 778 271</p><a href="https://careers.example.org/karriere">Karriere</a>')  # not a job platform
+    case, fetcher = _phase({"https://fjordbygg.example/": home})
+    assert "https://careers.example.org/karriere" not in fetcher.asked
+    assert not claims(case, "job_posting")
+    note = claims(case, "hiring_status", "not_available")[0]["note"]
+    assert note == "No careers/jobs page was found on the company's own website https://fjordbygg.example/"
+
+
+def test_careers_page_on_a_job_platform_linked_from_the_site_is_followed():
+    home = html("Fjord Bygg", '<p>Org.nr 914 778 271</p><a href="https://fjordbygg.teamtailor.com/jobs">Ledige stillinger</a>')
+    listing = html("Jobs", '<a href="/jobs/1001-tomrer">Tømrer til Bergen</a><a href="/jobs/1002-prosjektleder">Prosjektleder bygg</a>'
+                           '<a href="/jobs">Se alle våre stillinger</a><a href="https://www.teamtailor.com/en/careers-site/">Powered by Teamtailor</a>'
+                           '<a href="https://other.teamtailor.com/jobs/9-annen">Stilling hos en annen bedrift</a>')
+    ad1 = html("Tømrer", '<script type="application/ld+json">{"@type":"JobPosting","title":"Tømrer til Bergen","datePosted":"2026-10-01",'
+                         '"hiringOrganization":{"name":"Fjord Bygg AS"}}</script>')
+    ad2 = html("Prosjektleder", '<time itemprop="datePosted" datetime="2026-09-20">20. sept</time><h1>Prosjektleder bygg</h1>')
+    case, fetcher = _phase({"https://fjordbygg.example/": home, "https://fjordbygg.teamtailor.com/jobs": listing,
+                            "https://fjordbygg.teamtailor.com/jobs/1001-tomrer": ad1, "https://fjordbygg.teamtailor.com/jobs/1002-prosjektleder": ad2})
+    got = sorted((c["value"]["title"], c["value"]["date_posted"], c["value"]["url"]) for c in claims(case, "job_posting"))
+    assert got == [("Prosjektleder bygg", "2026-09-20", "https://fjordbygg.teamtailor.com/jobs/1002-prosjektleder"),
+                   ("Tømrer til Bergen", "2026-10-01", "https://fjordbygg.teamtailor.com/jobs/1001-tomrer")]
+    assert not any("teamtailor.com/en/" in u or "other.teamtailor" in u for u in fetcher.asked)
+    assert claims(case, "hiring_status")[0]["value"]["postings_found"] == 2
+
+
+def test_platform_ad_without_date_is_kept_with_title_and_link_only():
+    home = html("Fjord Bygg", '<p>Org.nr 914 778 271</p><a href="https://fjordbygg.webcruiter.no/">Karriere</a>')
+    listing = html("Ledige stillinger", '<a href="/Main/Recruit/Public/4711">Prosjektleder bygg</a><a href="/Main/Recruit/Public/4712">Bilmekaniker</a>')
+    case, _ = _phase({"https://fjordbygg.example/": home, "https://fjordbygg.webcruiter.no/": listing})
+    got = sorted((c["value"]["title"], c["value"]["date_posted"]) for c in claims(case, "job_posting"))
+    assert got == [("Bilmekaniker", None), ("Prosjektleder bygg", None)]
+
+
+def test_platform_ads_of_another_employer_are_not_published():
+    home = html("Fjord Bygg", '<p>Org.nr 914 778 271</p><a href="https://jobs.jobylon.com/companies/fjordbygg">Karriere</a>')
+    listing = html("Jobs", '<a href="/jobs/55-sjafor">Sjåfør til Oslo</a>')
+    ad = html("Sjåfør", '<script type="application/ld+json">{"@type":"JobPosting","title":"Sjåfør","hiringOrganization":{"name":"Annet Selskap AS"}}</script>')
+    case, _ = _phase({"https://fjordbygg.example/": home, "https://jobs.jobylon.com/companies/fjordbygg": listing, "https://jobs.jobylon.com/jobs/55-sjafor": ad})
+    assert not claims(case, "job_posting")  # the ad's own structured data names another employer
+
+
+def test_own_careers_page_is_used_and_an_empty_one_is_reported_as_checked():
+    home = html("Fjord Bygg", '<p>Org.nr 914 778 271</p><a href="/karriere">Karriere</a>')
+    ld = '<script type="application/ld+json">{"@type":"JobPosting","title":"Tømrer","hiringOrganization":{"name":"Fjord Bygg AS"}}</script>'
+    case, _ = _phase({"https://fjordbygg.example/": home, "https://fjordbygg.example/karriere": html("Karriere", ld)})
+    assert [c["value"]["title"] for c in claims(case, "job_posting")] == ["Tømrer"]
+    empty, _ = _phase({"https://fjordbygg.example/": home, "https://fjordbygg.example/karriere": html("Karriere", "<p>Ingen ledige stillinger</p>")})
+    assert not claims(empty, "job_posting")
+    note = claims(empty, "hiring_status", "not_available")[0]["note"]
+    assert note.startswith("Checked, no job postings found on the company's careers page https://fjordbygg.example/karriere")
+
+
+def test_no_confirmed_website_says_so_for_social_and_jobs():
+    case = case_named("FJORD BYGG AS")
+    web_phase(SiteFake({}), case, {}, None, max_guesses=0)
+    assert "no footer to read" in claims(case, "company_profile", "not_available")[0]["note"]
+    assert "no careers/jobs page could be checked" in claims(case, "hiring_status", "not_available")[0]["note"]
+
+
+def test_own_careers_page_that_only_points_to_a_job_platform_is_followed_one_hop():
+    home = html("Fjord Bygg", '<p>Org.nr 914 778 271</p><a href="/karriere">Karriere</a>')
+    careers = html("Karriere", '<a href="https://fjordbygg.jobylon.com/jobs">See our open positions</a>')
+    listing = html("Jobs", '<a href="/jobs/77-tomrer">Tømrer til Bergen</a>')
+    case, fetcher = _phase({"https://fjordbygg.example/": home, "https://fjordbygg.example/karriere": careers,
+                            "https://fjordbygg.jobylon.com/jobs": listing})
+    assert [c["value"]["title"] for c in claims(case, "job_posting")] == ["Tømrer til Bergen"]
+    # a platform page that shows no postings in plain HTML is reported as checked, naming both pages
+    case2, _ = _phase({"https://fjordbygg.example/": home, "https://fjordbygg.example/karriere": careers,
+                       "https://fjordbygg.jobylon.com/jobs": html("Jobs", "<div id=app></div>")})
+    note = claims(case2, "hiring_status", "not_available")[0]["note"]
+    assert "https://fjordbygg.example/karriere" in note and "https://fjordbygg.jobylon.com/jobs" in note
+
+
+def test_workday_career_site_is_read_through_its_json_endpoint_for_the_employer_only():
+    home = html("Fjord Bygg", '<p>Org.nr 914 778 271</p><a href="/karriere">Karriere</a>')
+    careers = html("Karriere", '<a href="https://fjordbygg.wd3.myworkdayjobs.com/en-US/FB">See our open positions</a>')
+    base = "https://fjordbygg.wd3.myworkdayjobs.com/wday/cxs/fjordbygg/FB"
+    listing = json.dumps({"total": 3, "jobPostings": [
+        {"title": "Tømrer", "externalPath": "/job/Bergen/Tomrer_JR1", "locationsText": "Bergen", "postedOn": "Posted 5 Days Ago"},
+        {"title": "Sjåfør", "externalPath": "/job/Oslo/Sjafor_JR2", "locationsText": "Oslo", "postedOn": "Posted Today"},
+        {"title": "Uten arbeidsgiver", "externalPath": "/job/Oslo/X_JR3", "locationsText": "Oslo", "postedOn": "Posted Today"}]})
+    def detail(title, start, org):
+        info = {"title": title, "startDate": start, "endDate": "2026-12-01", "externalUrl": f"https://fjordbygg.wd3.myworkdayjobs.com/FB/job/{title}"}
+        return json.dumps({"jobPostingInfo": info, **({"hiringOrganization": {"name": org}} if org else {})})
+    routes = {"https://fjordbygg.example/": home, "https://fjordbygg.example/karriere": careers,
+              "https://fjordbygg.wd3.myworkdayjobs.com/en-US/FB": html("Workday", "<div id=app></div>"), base + "/jobs": listing,
+              base + "/job/Bergen/Tomrer_JR1": detail("Tomrer", "2026-11-03", "1200 Fjord Bygg AS"),
+              base + "/job/Oslo/Sjafor_JR2": detail("Sjafor", "2026-11-01", "Fjord Bygg Eiendom AS"),  # a sister company on the same tenant
+              base + "/job/Oslo/X_JR3": detail("Uten", "2026-11-01", None)}
+    case, fetcher = _phase(routes)
+    got = [(c["value"]["title"], c["value"]["date_posted"], c["value"]["valid_through"], c["value"]["url"]) for c in claims(case, "job_posting")]
+    assert got == [("Tomrer", "2026-11-03", "2026-12-01", "https://fjordbygg.wd3.myworkdayjobs.com/FB/job/Tomrer")]
+    url, body = fetcher.posted[0]
+    assert url == base + "/jobs" and json.loads(body)["searchText"] == ""  # tenant and site derived from the careers link (locale skipped)
+    ev = case.evidence[claims(case, "job_posting")[0]["evidence_ids"][0]]
+    assert ev["source_url"] == base + "/job/Bergen/Tomrer_JR1" and ev["extraction_method"] == "workday_cxs_json"
+
+
+def test_workday_endpoint_failure_leaves_jobs_empty_and_reported():
+    home = html("Fjord Bygg", '<p>Org.nr 914 778 271</p><a href="/karriere">Karriere</a>')
+    careers = html("Karriere", '<a href="https://fjordbygg.wd3.myworkdayjobs.com/FB">See our open positions</a>')
+    case, _ = _phase({"https://fjordbygg.example/": home, "https://fjordbygg.example/karriere": careers,
+                      "https://fjordbygg.wd3.myworkdayjobs.com/FB": html("Workday", "<div id=app></div>")})
+    assert not claims(case, "job_posting")
+    assert "https://fjordbygg.wd3.myworkdayjobs.com/FB" in claims(case, "hiring_status", "not_available")[0]["note"]
+
+
+# ----- 7. step 3: viewer (find, compare, check a source; laptop and phone) -----------------------------------
+def _viewer_envs():
+    from signalpost_agent.pipeline import build_envelope
+    run = {"run_id": "r", "started_at": "a", "completed_at": "2026-11-04T10:00:00Z"}
+    feed = _rss(_item("Fjord Bygg vinner kontrakt i Bergen", "https://fjordbygg.example/nyheter/a/", "Mon, 06 Oct 2025 09:00:00 +0200"))
+    case, _ = _news({"https://fjordbygg.example/feed/": feed})
+    news_env = build_envelope(case, run, None, True, True)
+    bare = {"organisation_number": "999999999", "state": "failed", "claims": [], "evidence": []}
+    return news_env, bare
+
+
+def test_viewer_has_search_sort_filter_empty_message_and_phone_meta(tmp_path):
+    from signalpost_agent.htmlreport import write_html
+    news_env, bare = _viewer_envs()
+    write_html(tmp_path, [news_env, bare])
+    page = (tmp_path / "index.html").read_text(encoding="utf-8")
+    assert 'name="viewport"' in page and 'id="q"' in page and 'type="search"' in page
+    for option in ("Name A–Z", "Revenue, high to low", "Revenue, low to high", "Accounts year, newest first", "Employees, most first"):
+        assert option in page
+    for key in ("site", "news", "jobs", "latest"):
+        assert f'class="flt" data-key="{key}"' in page
+    assert "No companies match your search." in page and 'id="emptyreset"' in page
+    assert "@media (max-width:640px)" in page and "min-height:44px" in page  # phone layout and tap-sized controls
+    assert 'id="tray"' in page and 'id="diffonly"' in page and 'role="dialog"' in page
+
+
+def test_viewer_unknown_numbers_are_empty_never_zero():
+    from signalpost_agent.htmlreport import _sort_keys
+    news_env, bare = _viewer_envs()
+    keys = _sort_keys(bare)
+    assert keys["rev"] == "" and keys["year"] == "" and keys["emp"] == "" and keys["news"] == "0"
+    assert _sort_keys(news_env)["news"] == "1"
+
+
+def test_every_fact_row_has_a_date_and_a_tappable_source(tmp_path):
+    from signalpost_agent.htmlreport import _card, _claim_date
+    news_env, _ = _viewer_envs()
+    card = _card(news_env)
+    facts = card.split('<tbody>')[1].split("</tbody>")[0]
+    assert facts.count("<tr>") == len(news_env["claims"]) == facts.count('data-label="Date"')
+    ev = {"e1": {"retrieved_at": "2026-11-04T10:00:00Z"}}
+    assert _claim_date({"effective_date": "2025-10-06T00:00:00Z", "evidence_ids": ["e1"]}, ev, "2026-01-01") == ("dated", "2025-10-06")
+    assert _claim_date({"reporting_period": "2025-01-01..2025-12-31", "evidence_ids": ["e1"]}, ev, "2026-01-01") == ("period", "2025-01-01..2025-12-31")
+    assert _claim_date({"evidence_ids": ["e1"]}, ev, "2026-01-01") == ("read", "2026-11-04")
+    assert _claim_date({"evidence_ids": []}, ev, "2026-01-01") == ("checked", "2026-01-01")  # not available: still dated
+    assert '<time datetime="2025-10-06">2025-10-06</time> <a href="https://fjordbygg.example/nyheter/a/" target="_blank" rel="noopener">' in card
+    assert 'class="src" href="https://' in card and 'target="_blank"' in card
+
+
+def test_viewer_jobs_list_shows_date_or_says_it_is_not_shown():
+    from signalpost_agent.htmlreport import _jobs_list
+    env = {"claims": [{"field": "job_posting", "availability": "available", "value": {"title": "Tømrer", "date_posted": "2026-11-03", "url": "https://x.example/j/1"}},
+                      {"field": "job_posting", "availability": "available", "value": {"title": "Sjåfør", "date_posted": None, "url": "https://x.example/j/2"}}]}
+    out = _jobs_list(env)
+    assert "<time>2026-11-03</time>" in out and "<time>date not shown</time>" in out and out.index("Tømrer") < out.index("Sjåfør")
+
+
+# ----- 8. viewer UX round: explicit "no ..." badges, compact cards, labelled sources ------------------------------
+def test_badges_say_what_is_missing_and_only_present_things_are_green():
+    from signalpost_agent.htmlreport import _badges
+    none = _badges({"site": "0", "news": "0", "jobs": "0", "latest": "0", "year": "", "rev": "", "emp": ""})
+    assert none.count("badge no") == 4 and "✕ no website" in none and "✕ no news" in none and "✕ no jobs" in none and "✕ no accounts" in none
+    assert 'class="badge">' not in none  # nothing green when nothing is present
+    some = _badges({"site": "1", "news": "3", "jobs": "1", "latest": "1", "year": "2025"})
+    assert "✓ website" in some and "✓ 3 news" in some and "✓ 1 job<" in some and "✓ latest accounts" in some and "badge no" not in some
+    lagging = _badges({"site": "1", "news": "0", "jobs": "2", "latest": "0", "year": "2024"})
+    assert "✓ 2 jobs" in lagging and "✕ accounts not the latest (FY2024)" in lagging and "✕ no news" in lagging
+
+
+def test_card_is_compact_by_default_with_details_behind_a_button():
+    from test_core import _accounts, _run
+    from signalpost_agent.htmlreport import _card
+    env = _run({"sisteInnsendteAarsregnskap": "2025"}, _accounts(2024, 2025, revenue={2024: 200, 2025: 150}))
+    card = _card(env)
+    head, rest = card.split('<div class="actions">')
+    assert "Key figures, FY2025" in head and "Operating revenue" in head and "Annual result" in head and "Registered employees" in head
+    assert "Compare" in head and "✕ no website" in head
+    assert 'class="toggle" aria-expanded="false" aria-controls="more-914778271">Show details</button>' in rest
+    more = rest.split('<div class="more" id="more-914778271" hidden>')[1]
+    assert "Year over year" in more and "All facts, dates and sources" in more and 'class="sent"' in more  # all of it is behind the button
+    assert "Year over year" not in head and 'class="sent"' not in head and "<table" not in head
+
+
+def test_not_latest_accounts_are_flagged_in_the_key_figures():
+    from test_core import _accounts, _run
+    from signalpost_agent.htmlreport import _card
+    card = _card(_run({"sisteInnsendteAarsregnskap": "2025"}, _accounts(2023, 2024)))
+    assert "Key figures, FY2024" in card and "NOT latest" in card.split('<div class="actions">')[0]
+
+
+def test_sources_are_labelled_by_what_they_are():
+    from signalpost_agent.htmlreport import _link, _source_kind
+    assert _source_kind("https://data.brreg.no/enhetsregisteret/api/enheter/914778271") == "register entry"
+    assert _source_kind("https://data.brreg.no/regnskapsregisteret/regnskap/914778271") == "annual accounts"
+    assert _source_kind("https://data.brreg.no/enhetsregisteret/api/enheter/914778271/roller") == "roles"
+    assert _source_kind("https://data.brreg.no/enhetsregisteret/api/underenheter?overordnetEnhet=1") == "workplaces"
+    assert _source_kind("https://www.wikidata.org/wiki/Q1") == "Wikidata"
+    assert _source_kind("https://fjordbygg.teamtailor.com/jobs/1-x") == "job platform"
+    assert _source_kind("https://fjordbygg.example/nyheter/a/") == "news article"
+    assert _source_kind("https://fjordbygg.example/") == "company website"
+    a = _link("https://data.brreg.no/enhetsregisteret/api/enheter/914778271", "2026-11-04T10:00:00Z")
+    b = _link("https://data.brreg.no/regnskapsregisteret/regnskap/914778271", "2026-11-04T10:00:00Z")
+    assert 'class="k">register entry</span>' in a and 'class="k">annual accounts</span>' in b
+    assert "data.brreg.no · 2026-11-04" in a and "data.brreg.no · 2026-11-04" in b  # same site and date, different label

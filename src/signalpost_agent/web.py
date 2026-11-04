@@ -35,7 +35,8 @@ SOCIAL = {
     "tiktok": (re.compile(r"^(?:www\.)?tiktok\.com$"), re.compile(r"^/@[^/?#]+")),
 }
 ATS_HOSTS = ("webcruiter", "easycruit", "teamtailor", "recman", "reachmee", "varbi", "hrmanager", "jobylon", "cvpartner",
-             "lever.co", "workable.com", "greenhouse.io", "smartrecruiters", "jobbnorge", "lyse.no", "personio", "hire.", "recruitee", "ashbyhq")
+             "lever.co", "workable.com", "greenhouse.io", "smartrecruiters", "jobbnorge", "lyse.no", "personio", "hire.", "recruitee", "ashbyhq",
+             "myworkdayjobs", "emply.", "talentech", "join.com", "breezy.hr")
 CAREERS_RE = re.compile(r"karriere|ledige[-_ ]?stilling|stillinger|\bjobb|career|\bjobs?\b|rekrutter|join[-_ ]us|work[-_ ]with|bli[-_ ]med|vacanc", re.I)
 NEWS_RE = re.compile(r"nyhet|news|aktuelt|blogg|blog|presse|pressemelding|artikkel|innlegg|meldinger", re.I)
 LEGAL_RE = re.compile(r"kontakt|contact|om[-_ ]oss|about|personvern|privacy|vilkar|vilkår|terms|impressum|betingelser|handelsbetingelser|cookie|selskap", re.I)
@@ -122,7 +123,7 @@ def name_matches(text_norm: str, tokens: list[str]) -> bool:
     return phrase in text_norm or all(t in words for t in tokens)
 
 
-def parse_date(value: str | None) -> str | None:
+def parse_date(value: str | None, *, future: bool = False) -> str | None:
     if not value:
         return None
     value = value.strip()
@@ -143,7 +144,7 @@ def parse_date(value: str | None) -> str | None:
         return None
     if parsed.tzinfo is None:
         parsed = parsed.replace(tzinfo=timezone.utc)
-    if parsed.year < 2000 or parsed > datetime.now(timezone.utc) + timedelta(days=1):
+    if parsed.year < 2000 or (not future and parsed > datetime.now(timezone.utc) + timedelta(days=1)):
         return None
     return parsed.date().isoformat()
 
@@ -591,16 +592,23 @@ def declared_profiles(ctx: SiteContext, legal_name: str) -> set[str]:
 
 
 def extract_social(case: Case, ctx: SiteContext, legal_name: str) -> None:
-    """Social profiles linked from the company's own site, kept only when each one can be tied to this company."""
+    """Social profiles linked from the footer of the company's confirmed own site (homepage), kept only when each one can be tied
+    to this company. Header, body, legal-page and other-page links are not read. Says so when nothing is found."""
     anchors = [a for a in {re.sub(r"[^a-z0-9]", "", ctx.host.split(".")[0]), "".join(name_tokens(legal_name))} if len(a) >= 4]
     declared = declared_profiles(ctx, legal_name)
     found: dict[str, dict[str, list[tuple[str, str, Response]]]] = {}
     rejected: dict[str, str] = {}
-    for url, (page, resp) in ctx.pages.items():
+    home_url = ctx.home_resp.final_url
+    page, resp = ctx.home, ctx.home_resp
+    seen_in_footer = 0
+    for url in (home_url,):
         for link in page.links:
+            if not link.in_footer:
+                continue
             cls = classify_social(page.abs(link.href))
             if not cls:
                 continue
+            seen_in_footer += 1
             platform, clean = cls
             why = social_mismatch(platform, clean, anchors, declared)
             if why:
@@ -621,11 +629,16 @@ def extract_social(case: Case, ctx: SiteContext, legal_name: str) -> None:
         eid = case.ev(page_url, "company_owned", resp.retrieved_at, resp.sha256, f"link to {clean}", "outbound_link_from_verified_site", http_status=200)
         case.claim("company_profile", {"platform": platform, "url": clean, "linked_from": page_url}, "available", [eid],
                    key=platform, confidence=0.9, section="4",
-                   note="Profile name carries the company name and no group, country or agency marker; the platform itself was not scraped")
-    if rejected and not found:
-        case.claim("company_profile", None, "not_available", [], key="any", section="4",
-                   note=("Social links on the site were not published because they cannot be tied to this company: "
-                         + "; ".join(sorted(rejected.values())[:6]))[:400])
+                   note="Linked from the footer of the company's own site; the handle carries the company name and no group, country or agency marker. The platform itself was not scraped")
+    if not found:
+        if rejected:
+            note = ("Footer social links were not published because they cannot be tied to this company: "
+                    + "; ".join(sorted(rejected.values())[:6]))
+        elif not page.has_footer:
+            note = f"The homepage of {ctx.origin} has no footer section, so no social links were read (only footer links are used)"
+        else:
+            note = f"No social media links found in the footer of {ctx.origin}"
+        case.claim("company_profile", None, "not_available", [], key="any", section="4", note=note[:400])
 
 
 def _job_from_ld(item: dict, page: Page) -> dict | None:
@@ -644,57 +657,147 @@ def _job_from_ld(item: dict, page: Page) -> dict | None:
             place = ", ".join(filter(None, [addr.get("streetAddress"), addr.get("postalCode"), addr.get("addressLocality")])) or None
         elif isinstance(addr, str):
             place = addr
-    return {"title": title.strip()[:160], "date_posted": parse_date(item.get("datePosted")), "valid_through": parse_date(item.get("validThrough")),
+    return {"title": title.strip()[:160], "date_posted": parse_date(item.get("datePosted")), "valid_through": parse_date(item.get("validThrough"), future=True),
             "hiring_organization": org_name, "location": place, "url": item.get("url") or page.url}
 
 
+def ats_host(host: str) -> bool:
+    return any(h in host for h in ATS_HOSTS)
+
+
+def ats_ad_like(url: str) -> bool:
+    """An ad URL on a job platform (/jobs/123-title, /Public/4711, ?jobid=9), not the platform's or the company's root page."""
+    parts = urllib.parse.urlsplit(url)
+    if (parts.hostname or "").endswith("myworkdayjobs.com"):
+        return "/job/" in parts.path  # /en-US/SiteName is the career site, /job/... is one posting
+    return len([seg for seg in parts.path.split("/") if seg]) >= 2 or bool(re.search(r"(?:^|[?&])\w*(?:id|job|ad)\w*=", parts.query, re.I))
+
+
+WORKDAY_LOCALE = re.compile(r"^[a-z]{2}(?:-[A-Za-z]{2})?$")
+
+
+def workday_jobs(fetcher: Fetcher, case: Case, careers_url: str, legal_name: str, max_postings: int = 12) -> list[dict]:
+    """Postings of a Workday career site through its public JSON endpoint (the one the site's own page calls), no scripts run.
+    The list gives titles and paths; each posting's detail gives the real start date, public URL and the hiring organisation, and
+    only postings whose hiring organisation is this company are kept."""
+    parts = urllib.parse.urlsplit(careers_url)
+    segments = [seg for seg in parts.path.split("/") if seg and not WORKDAY_LOCALE.match(seg)]
+    host = parts.hostname or ""
+    if not host.endswith("myworkdayjobs.com") or not segments:
+        return []
+    tenant, site = host.split(".")[0], segments[0]
+    base = f"https://{host}/wday/cxs/{tenant}/{site}"
+    body = json.dumps({"appliedFacets": {}, "limit": max_postings, "offset": 0, "searchText": ""}).encode()
+    listing = fetcher.get(base + "/jobs", case.ops, accept="application/json", data=body, headers={"Content-Type": "application/json"})
+    try:
+        rows = json.loads(listing.text)["jobPostings"] if listing.status == 200 else []
+    except (ValueError, KeyError, TypeError):
+        rows = []
+    out: list[dict] = []
+    for row in rows[:max_postings]:
+        path = row.get("externalPath") if isinstance(row, dict) else None
+        if not path or not row.get("title"):
+            continue
+        detail = fetcher.get(base + path, case.ops, accept="application/json")
+        try:
+            data = json.loads(detail.text) if detail.status == 200 else {}
+            info = data.get("jobPostingInfo") or {}
+        except (ValueError, AttributeError):
+            continue
+        org = (data.get("hiringOrganization") or {}).get("name")
+        job = {"title": str(info.get("title") or row["title"]).strip()[:160], "date_posted": parse_date(info.get("startDate")),
+               "valid_through": parse_date(info.get("endDate"), future=True), "hiring_organization": org,
+               "location": info.get("location") or row.get("locationsText"), "url": info.get("externalUrl") or f"https://{host}/{site}{path}"}
+        own = name_tokens(legal_name)
+        shown = [t for t in name_tokens(org or "") if not t.isdigit()]  # "1200 Equinor ASA" is Equinor ASA
+        if org and shown == own:  # the employer itself: not a sister company, and no organisation shown means unproven
+            out.append({**job, "method": "workday_cxs_json", "confidence": 0.95, "_resp": detail})
+    return out
+
+
 def extract_jobs(fetcher: Fetcher, case: Case, ctx: SiteContext, legal_name: str) -> dict[str, Any]:
-    """Careers page of the verified site. Returns {'checked': bool, 'count': n, 'page': url}."""
+    """Jobs from the company's own careers/jobs page: a page on the verified site, or the page on a job platform (Teamtailor,
+    Webcruiter, Jobylon, ReachMee, ...) that the verified site links to as its careers page. Nothing else is a source.
+    Returns {'checked': bool, 'count': n, 'page': url}; checked is False when the site has no such page."""
     home = ctx.home
-    candidates: list[str] = []
+    own: list[str] = []
+    platform: list[str] = []
     for link in home.links:
         absu = home.abs(link.href).split("#")[0]
-        host = (urllib.parse.urlsplit(absu).hostname or "").lower()
-        if CAREERS_RE.search(urllib.parse.urlsplit(absu).path) or CAREERS_RE.search(link.text):
-            if ctx.same_site(absu) or any(h in host for h in ATS_HOSTS):
-                if absu not in candidates:
-                    candidates.append(absu)
+        parts = urllib.parse.urlsplit(absu)
+        if CAREERS_RE.search(parts.path) or CAREERS_RE.search(link.text) or (ats_host(parts.hostname or "") and not parts.path.strip("/")):
+            if ctx.same_site(absu) and absu not in own:
+                own.append(absu)
+            elif ats_host((parts.hostname or "").lower()) and absu not in platform:
+                platform.append(absu)
+    candidates = sorted(own, key=len)[:2] + sorted(platform, key=len)[:2]
     if not candidates:
         candidates = [urllib.parse.urljoin(ctx.origin, p) for p in ("karriere", "ledige-stillinger", "jobb", "careers")]
-    candidates = sorted(candidates, key=lambda u: len(u))[:3]
     tokens = name_tokens(legal_name)
-    for url in candidates:
+
+    def org_ok(job: dict) -> bool:
+        org_name = job.get("hiring_organization")
+        return not (org_name and not name_matches(norm(org_name), tokens) and norm(org_name) not in norm(legal_name))
+
+    queue, visited, checked_pages = candidates[:4], set(), []
+    while queue and len(visited) < 6:
+        url = queue.pop(0)
+        if url in visited:
+            continue
+        visited.add(url)
         resp = fetcher.get(url, case.ops)
         page = _html_page(resp)
-        if page is None:
+        final_host = (urllib.parse.urlsplit(resp.final_url).hostname or "").lower()
+        on_site = ctx.same_site(resp.final_url)
+        if page is None or not (on_site or ats_host(final_host)):  # a redirect to some other host is not the careers page
             continue
-        ctx.pages[resp.final_url] = (page, resp)
+        if on_site:
+            ctx.pages[resp.final_url] = (page, resp)
+        checked_pages.append(resp.final_url)
         jobs: list[dict] = []
         for item in page.jsonld:
             if "JobPosting" in ld_types(item):
                 job = _job_from_ld(item, page)
-                if job:
-                    org_name = job.get("hiring_organization")
-                    if org_name and not name_matches(norm(org_name), tokens) and norm(org_name) not in norm(legal_name):
-                        continue
+                if job and org_ok(job):
                     jobs.append({**job, "method": "json_ld_jobposting", "confidence": 0.95})
+        if not jobs and final_host.endswith("myworkdayjobs.com"):
+            jobs = workday_jobs(fetcher, case, resp.final_url, legal_name)
         if not jobs:
-            # A careers page is full of menu links ("What we offer", "Graduate programme", "FAQ"): a link is never a posting
-            # by itself. Only an ATS-hosted ad URL, or a same-site page that itself carries JobPosting JSON-LD, is one.
+            # A careers page is full of menu links ("What we offer", "Graduate programme", "FAQ"): a link is never a posting by
+            # itself. Only an ad on a job platform, or a same-site page that itself carries JobPosting JSON-LD, is one.
             opened = 0
             for link in page.links:
                 text = link.text.strip()
                 absu = page.abs(link.href).split("#")[0]
                 parts = urllib.parse.urlsplit(absu)
-                if not (8 <= len(text) <= 90) or JOB_STOP.search(text) or NOT_JOB_RE.search(text) or absu == resp.final_url:
+                host = (parts.hostname or "").lower()
+                if not (8 <= len(text) <= 90) or JOB_STOP.search(text) or absu == resp.final_url or any(j["url"] == absu for j in jobs):
                     continue
-                if any(j["url"] == absu for j in jobs):
-                    continue
-                if any(h in (parts.hostname or "").lower() for h in ATS_HOSTS):
-                    if len([seg for seg in parts.path.split("/") if seg]) >= 2 or re.search(r"(?:^|[?&])(?:id|jobid|adid|ad|job)=", parts.query, re.I):
-                        jobs.append({"title": text, "date_posted": None, "valid_through": None, "hiring_organization": None,
-                                     "location": None, "url": absu, "method": "ats_ad_link", "confidence": 0.6})
-                elif ctx.same_site(absu) and JOB_PATH_RE.search(parts.path) and opened < 8:
+                if ats_host(host):
+                    if (not on_site and host != final_host) or not ats_ad_like(absu):
+                        continue  # on a platform page, only ads on that same platform host (not its "powered by" links)
+                    job, foreign = None, False
+                    if opened < 8:
+                        opened += 1
+                        ad = fetcher.get(absu, case.ops)
+                        ad_page = _html_page(ad)
+                        if ad_page is not None:
+                            for item in ad_page.jsonld:
+                                cand = _job_from_ld(item, ad_page) if "JobPosting" in ld_types(item) else None
+                                if cand and org_ok(cand):
+                                    job = {**cand, "url": ad.final_url, "method": "platform_ad_page_json_ld", "confidence": 0.9, "_resp": ad}
+                                    break
+                                foreign = foreign or bool(cand)  # the ad itself names another employer
+                            if job is None:
+                                shown = next((parse_date(t.datetime) for t in ad_page.times if PUBLISHED_TIME_HINT.search(t.hint)), None)
+                                if shown:
+                                    job = {"title": text, "date_posted": shown, "valid_through": None, "hiring_organization": None, "location": None,
+                                           "url": absu, "method": "platform_ad_page_time", "confidence": 0.7, "_resp": ad}
+                    if foreign and job is None:
+                        continue
+                    jobs.append(job or {"title": text, "date_posted": None, "valid_through": None, "hiring_organization": None,
+                                        "location": None, "url": absu, "method": "platform_ad_link", "confidence": 0.6})
+                elif on_site and ctx.same_site(absu) and JOB_PATH_RE.search(parts.path) and not NOT_JOB_RE.search(text) and opened < 8:
                     opened += 1
                     ad = fetcher.get(absu, case.ops)
                     ad_page = _html_page(ad)
@@ -702,12 +805,17 @@ def extract_jobs(fetcher: Fetcher, case: Case, ctx: SiteContext, legal_name: str
                         continue
                     for item in ad_page.jsonld:
                         job = _job_from_ld(item, ad_page) if "JobPosting" in ld_types(item) else None
-                        org_name = (job or {}).get("hiring_organization")
-                        if job and not (org_name and not name_matches(norm(org_name), tokens) and norm(org_name) not in norm(legal_name)):
+                        if job and org_ok(job):
                             jobs.append({**job, "url": ad.final_url, "method": "linked_ad_page_json_ld", "confidence": 0.9, "_resp": ad})
                             break
                 if len(jobs) >= 12:
                     break
+            if not jobs and on_site:
+                # The own careers page may only point to the job platform ("See our open positions"): follow that one hop
+                for link in page.links:
+                    absu = page.abs(link.href).split("#")[0]
+                    if ats_host((urllib.parse.urlsplit(absu).hostname or "").lower()) and not ats_ad_like(absu) and absu not in visited                             and absu not in queue and len(queue) < 2:
+                        queue.append(absu)
         for job in jobs[:15]:
             span = job["title"] + (f" (datePosted {job['date_posted']})" if job["date_posted"] else "")
             src = job.get("_resp", resp)
@@ -715,9 +823,10 @@ def extract_jobs(fetcher: Fetcher, case: Case, ctx: SiteContext, legal_name: str
                           effective_date=job["date_posted"])
             value = {k: v for k, v in job.items() if k not in ("method", "confidence", "_resp")}
             case.claim("job_posting", value, "available", [eid], key=job["url"], confidence=job["confidence"],
-                       effective_date=job["date_posted"], section="5", note="Posting listed on the company's own careers page")
-        return {"checked": True, "count": len(jobs[:15]), "page": resp.final_url}
-    return {"checked": False, "count": 0, "page": None}
+                       effective_date=job["date_posted"], section="5", note="Posting listed on the company's own careers page, or on the job platform page the company links to as its careers page")
+        if jobs:
+            return {"checked": True, "count": len(jobs[:15]), "page": resp.final_url, "pages": checked_pages}
+    return {"checked": bool(checked_pages), "count": 0, "page": checked_pages[0] if checked_pages else None, "pages": checked_pages}
 
 
 # ----- news: only real, dated posts ---------------------------------------------------
@@ -795,20 +904,37 @@ def _parse_feed(text: str) -> list[dict]:
             ctag = child.tag.rsplit("}", 1)[-1]
             if ctag == "link":
                 d.setdefault("link", child.attrib.get("href") or (child.text or "").strip())
-            elif ctag in ("title", "pubDate", "published", "date", "guid"):
+            elif ctag in ("title", "pubDate", "published", "date", "guid", "description", "summary", "encoded"):
                 d.setdefault(ctag, (child.text or "").strip())
         raw = d.get("pubDate") or d.get("published") or d.get("date")
         date = parse_date(raw)
         link = (d.get("link") or (d.get("guid") if str(d.get("guid", "")).startswith("http") else "") or "").strip()
         if d.get("title") and date and link:
-            items.append({"title": re.sub(r"\s+", " ", d["title"])[:200], "date": date, "url": link, "raw_date": raw})
+            blurb = re.sub(r"\s+", " ", re.sub(r"<[^>]+>", " ", d.get("description") or d.get("summary") or d.get("encoded") or ""))
+            items.append({"title": re.sub(r"\s+", " ", d["title"])[:200], "date": date, "url": link, "raw_date": raw, "blurb": blurb[:600]})
     return items
 
 
-def extract_activity(fetcher: Fetcher, case: Case, ctx: SiteContext) -> dict[str, Any]:
-    """Dated company news from the site's own feed, else from article pages listed in its sitemap. Returns {'checked','count'}."""
+def extract_activity(fetcher: Fetcher, case: Case, ctx: SiteContext, legal_name: str) -> dict[str, Any]:
+    """Dated news articles that name the company, from the site's own feed, else from article pages in its sitemap.
+    Register change records are not news and are never emitted. Returns {'checked','count'}."""
     origin = ctx.origin
     label = re.sub(r"[^a-z0-9]", "", ctx.host.split(".")[0])
+    legal_tokens = name_tokens(legal_name)
+    brand_tokens = site_brand_tokens(ctx, legal_name)
+    opened = 0
+    chrome = {line.strip() for line in ctx.home.text.split("\n")}
+
+    def article_text(page: Page) -> str:
+        """The page's own text: lines that also sit on the homepage (menu, footer, <title> suffix) are site chrome, not the article."""
+        return " ".join(line for line in page.text.split("\n") if line.strip() and line.strip() not in chrome and line.strip() != page.title)[:20000]
+
+    def names_company(text: str) -> bool:
+        words = norm(text)
+        squashed = words.replace(" ", "")
+        return (name_matches(words, legal_tokens) or (bool(brand_tokens) and name_matches(words, brand_tokens))
+                or (len(label) >= 4 and label in squashed) or (len("".join(legal_tokens)) >= 5 and "".join(legal_tokens) in squashed))
+
     feeds: list[str] = []
     for _t, href, _title in ctx.home.alternates:
         feeds.append(ctx.home.abs(href))
@@ -831,6 +957,15 @@ def extract_activity(fetcher: Fetcher, case: Case, ctx: SiteContext) -> dict[str
             title = clean_headline(item["title"], label)
             if not title or not news_url_ok(item["url"], ctx) or item["url"] in seen:
                 continue
+            if not names_company(title + " " + item["blurb"]):
+                # the headline does not say; the article itself must (a bounded number of pages is opened for this)
+                if opened >= 6:
+                    continue
+                opened += 1
+                art = fetcher.get(item["url"], case.ops)
+                art_page = _html_page(art)
+                if art_page is None or not names_company(title + " " + article_text(art_page)):
+                    continue
             seen.add(item["url"])
             eid = case.ev(resp.final_url, "company_owned", resp.retrieved_at, resp.sha256, f"{item['date']} {title}",
                           "rss_atom_item_publish_date", http_status=200, effective_date=item["date"])
@@ -880,7 +1015,7 @@ def extract_activity(fetcher: Fetcher, case: Case, ctx: SiteContext) -> dict[str
             continue
         published, is_article = page_published(page)
         title = clean_headline(page.meta.get("og:title") or page.title, label)
-        if not (published and is_article and title):
+        if not (published and is_article and title and names_company(title + " " + article_text(page))):
             continue
         eid = case.ev(resp.final_url, "company_owned", resp.retrieved_at, resp.sha256, f"{published} {title[:150]}",
                       "article_page_publish_date", http_status=200, effective_date=published)

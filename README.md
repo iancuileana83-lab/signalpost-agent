@@ -19,7 +19,7 @@ number per line. Useful options: `--report out/report.json` (machine-readable ru
 `--previous earlier-envelopes.jsonl` (idempotent refresh + change detection), `--html out/html` (static,
 mobile-friendly profile browser), `--deadline-seconds N` (soft time budget),
 `--registry-snapshot FILE` (frozen universe `.jsonl.gz` or bulk `.csv`, used only if the live registry
-fails), `--workers`, `--no-web`, `--nav-search` (see Sources).
+fails), `--workers`, `--no-web`.
 
 ## Clean-machine install
 
@@ -48,8 +48,7 @@ Claim availability is one of `available`, `not_available`, `blocked`, `not_appli
 | Enhetsregisteret open API (data.brreg.no) | identity, status, industry, address, employees, roles, subunits, registry updates | keyless JSON API, ~12 req/s global cap | NLOD 2.0 |
 | Regnskapsregisteret open API (data.brreg.no) | normalised annual accounts, filing years | keyless JSON API | NLOD 2.0 |
 | Wikidata SPARQL (query.wikidata.org) | item matched by exact org-number statement P2333: website, social identifiers | keyless, 1 batched query per 60 companies, descriptive User-Agent | CC0 |
-| The company's own website | org-number proof, brand, description, outbound profile links, careers page, news feed / sitemap | only after identity is verified; robots.txt honoured; 1 req/s per host | company copyright; only short facts and links are kept |
-| NAV Arbeidsplassen public ad search (opt-in `--nav-search`) | job ads whose ad page shows the employer org number | **off by default**: undocumented endpoint that rate-limited us after ~100 requests | NLOD 2.0 data |
+| The company's own website | org-number proof, brand, description, outbound profile links, careers page (on the site, or on the job platform it links to), news feed / sitemap | only after identity is verified; robots.txt honoured; 1 req/s per host | company copyright; only short facts and links are kept |
 
 Not used: LinkedIn, Meta, Indeed, Glassdoor, Google or any search engine, any paid or keyed API. Social
 profile URLs are taken only from links on the verified company site (or from Wikidata identifiers); the

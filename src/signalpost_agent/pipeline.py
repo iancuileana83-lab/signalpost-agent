@@ -31,7 +31,6 @@ def official_phase(fetcher: Fetcher, case: Case, snapshot_row: dict | None) -> d
     official.fetch_accounts(fetcher, case)
     official.fetch_roles(fetcher, case)
     official.fetch_workplaces(fetcher, case)
-    official.fetch_updates(fetcher, case)
     return entity
 
 
@@ -64,7 +63,7 @@ def legal_name_of(case: Case) -> str | None:
     return None
 
 
-def web_phase(fetcher: Fetcher, case: Case, entity: dict | None, wikidata: dict | None, *, use_nav: bool, max_guesses: int) -> dict[str, Any]:
+def web_phase(fetcher: Fetcher, case: Case, entity: dict | None, wikidata: dict | None, *, max_guesses: int) -> dict[str, Any]:
     """Website resolution + company-owned and public-portal facts. Never raises."""
     outcome: dict[str, Any] = {"site": False, "jobs_checked": [], "activity_checked": []}
     name = legal_name_of(case)
@@ -97,11 +96,13 @@ def web_phase(fetcher: Fetcher, case: Case, entity: dict | None, wikidata: dict 
         try:
             jobs = web.extract_jobs(fetcher, case, ctx, name)
             if jobs["checked"]:
-                outcome["jobs_checked"].append(f"company careers page {jobs['page']}")
+                outcome["jobs_checked"] += [f"the company's careers page {u}" for u in jobs["pages"]]
+            else:
+                outcome["jobs_note"] = f"No careers/jobs page was found on the company's own website {ctx.origin}"
         except Exception as exc:  # noqa: BLE001
             case.error("careers", f"{type(exc).__name__}: {exc}")
         try:
-            act = web.extract_activity(fetcher, case, ctx)
+            act = web.extract_activity(fetcher, case, ctx, name)
             if act["checked"]:
                 outcome["activity_checked"].append("company RSS/Atom feed or sitemap")
         except Exception as exc:  # noqa: BLE001
@@ -110,18 +111,6 @@ def web_phase(fetcher: Fetcher, case: Case, entity: dict | None, wikidata: dict 
                          if c["field"] == "company_profile" and c["availability"] == "available"}
     elif entity is not None:
         case.claim("public_brand", None, "not_available", [], note="No verified website to read a brand name from", section="1")
-    if wikidata:
-        external.wikidata_profiles(case, wikidata, have_profiles)
-    employees = next((c["value"] for c in case.claims if c["field"] == "registered_employees" and c["availability"] == "available"), None)
-    if use_nav and status == "active" and employees:
-        try:
-            nav = external.nav_jobs(fetcher, case, name)
-            if nav["checked"]:
-                outcome["jobs_checked"].append("NAV Arbeidsplassen public ads (exact employer org number)")
-            else:
-                outcome["jobs_unavailable"] = f"NAV Arbeidsplassen could not be queried ({nav.get('state')}, rate limited or unavailable)"
-        except Exception as exc:  # noqa: BLE001
-            case.error("nav_jobs", f"{type(exc).__name__}: {exc}")
     # Summary claims: absence is stated as not_available, never as zero.
     postings = [c for c in case.claims if c["field"] == "job_posting" and c["availability"] == "available"]
     if postings:
@@ -130,9 +119,9 @@ def web_phase(fetcher: Fetcher, case: Case, entity: dict | None, wikidata: dict 
                    note="Number of verified postings found in the checked sources; not a complete count of the company's vacancies")
     else:
         checked = outcome["jobs_checked"]
-        extra = ("; " + outcome["jobs_unavailable"]) if outcome.get("jobs_unavailable") else ""
         case.claim("hiring_status", None, "not_available", [],
-                   note=(("Checked, no postings found: " + "; ".join(checked) + extra) if checked else "No job source could be checked (no verified company website)" + extra),
+                   note=(("Checked, no job postings found on " + "; ".join(checked)) if checked
+                         else outcome.get("jobs_note") or "No confirmed own website, so no careers/jobs page could be checked"),
                    section="5")
     if not any(c["field"] == "public_activity" and c["availability"] == "available" and c["claim_key"].startswith("public_activity:news:")
                for c in case.claims):
@@ -143,7 +132,7 @@ def web_phase(fetcher: Fetcher, case: Case, entity: dict | None, wikidata: dict 
     if not any(c["field"] == "company_profile" and (c["availability"] in ("available", "ambiguous") or c["claim_key"] == "company_profile:any")
                for c in case.claims):
         case.claim("company_profile", None, "not_available", [], key="any",
-                   note="No company-owned social profile links found on a verified site or Wikidata item", section="4")
+                   note="No confirmed own website, so no footer to read social links from", section="4")
     return outcome
 
 
@@ -349,14 +338,12 @@ def summarize(case: Case) -> dict[str, Any]:
     else:
         unknowns.append("no job postings were found in the checked sources (this does not prove the company is not hiring)")
     activity = sorted(by_field.get("public_activity", []), key=lambda c: c.get("effective_date") or "", reverse=True)
-    news = [a for a in activity if a["value"].get("kind") == "company_news"]
+    news = [a for a in activity if (a["value"] or {}).get("kind") == "company_news"]
     if news:
         n = news[0]["value"]
         sentences.append({"text": f"Latest dated company news: \"{n['title']}\" ({n['date']}).", "claims": [news[0]["claim_key"]]})
-    elif activity:
-        v = activity[0]["value"]
-        sentences.append({"text": f"Latest dated register activity: {v['title']} on {v['date'][:10]} (no company news found).",
-                          "claims": [activity[0]["claim_key"]]})
+    else:
+        unknowns.append("no dated news article naming the company was found on its own website")
     by_key = {c["claim_key"]: c for c in case.claims}
     for s in sentences:  # a receipt for every sentence: where each cited claim was read, and when
         s["sources"] = _sources(case, [by_key[k] for k in s["claims"] if k in by_key])

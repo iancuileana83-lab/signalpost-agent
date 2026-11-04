@@ -22,7 +22,7 @@ FAMILIES = {
     "legal_identity": "legal_name", "annual_accounts": "annual_accounts", "leadership": "leadership",
     "registered_workplace": "registered_workplace", "official_website": "official_website", "public_brand": "public_brand",
     "company_description": "company_description", "company_profile": "company_profile", "job_posting": "job_posting",
-    "company_news": "public_activity:company_news", "registry_update": "public_activity:registry_update",
+    "company_news": "public_activity:company_news",
 }
 
 
@@ -107,7 +107,7 @@ def run(args: argparse.Namespace) -> int:
     previous = load_previous(args.previous)
     deadline = t0 + args.deadline_seconds if args.deadline_seconds else None
     fetcher = Fetcher(default_interval=args.site_interval, retries=args.retries, timeout=args.timeout,
-                      host_intervals={"data.brreg.no": args.brreg_interval, "query.wikidata.org": 1.5, "arbeidsplassen.nav.no": args.nav_interval})
+                      host_intervals={"data.brreg.no": args.brreg_interval, "query.wikidata.org": 1.5})
     run_meta = {"run_id": args.run_id, "started_at": started_at}
     cases: dict[str, Case] = {org: Case(org) for org in orgs}
     entities: dict[str, dict | None] = {}
@@ -167,7 +167,7 @@ def run(args: argparse.Namespace) -> int:
         t_start = time.monotonic()
         case.ops.deadline = t_start + args.company_budget_seconds
         try:
-            outcomes[org] = web_phase(fetcher, case, entities.get(org), wikidata.get(org), use_nav=args.nav_search, max_guesses=args.max_guesses)
+            outcomes[org] = web_phase(fetcher, case, entities.get(org), wikidata.get(org), max_guesses=args.max_guesses)
             web_done.add(org)
         finally:
             case.ops.busy_s += time.monotonic() - t_start
@@ -314,14 +314,11 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--deadline-seconds", type=float, default=0, help="soft budget: web research is skipped (and stated) once exceeded")
     p.add_argument("--brreg-interval", type=float, default=0.08, help="seconds between requests to data.brreg.no")
     p.add_argument("--site-interval", type=float, default=1.0, help="seconds between requests to the same company host")
-    p.add_argument("--nav-interval", type=float, default=1.0)
     p.add_argument("--retries", type=int, default=2)
     p.add_argument("--timeout", type=float, default=10.0)
     p.add_argument("--max-guesses", type=int, default=7, help="name-derived domain candidates to try per company")
     p.add_argument("--company-budget-seconds", type=float, default=60.0, help="max wall time spent on web research per company")
     p.add_argument("--no-web", action="store_true", help="official registers only")
-    p.add_argument("--nav-search", action="store_true",
-                   help="also query NAV Arbeidsplassen's public ad search (off by default: the endpoint is undocumented and rate-limits hard)")
     p.add_argument("--no-wikidata", action="store_true")
     p.add_argument("--quiet", action="store_true")
     args = parser.parse_args(argv)

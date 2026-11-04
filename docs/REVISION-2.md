@@ -42,13 +42,21 @@ publish date, otherwise nothing is emitted.
 
 Known limits: a site that publishes its date only as visible text yields no news (by design); the handle test cannot accept a
 genuine profile whose name does not contain the company name unless the site declares it in JSON-LD; a company that lists
-vacancies only as plain links to its own non-structured pages shows no postings from its site (NAV Arbeidsplassen ads, matched by
-exact organisation number, are unaffected).
+vacancies only as plain links to its own non-structured pages shows no postings from its site. The NAV Arbeidsplassen source and the `--nav-search` flag were removed.
 
 **Job postings** (`extract_jobs`, added after the first push). A careers-page link is never a posting by itself. A posting is
 (a) a JobPosting JSON-LD block on the careers page, (b) a link to a same-site page that itself carries JobPosting JSON-LD whose
 hiring organisation is this company, or (c) a link to an ATS-hosted ad (Webcruiter, Teamtailor, ...) with an ad-like URL, not the
-ATS root. Menu labels, programme pages, FAQs and employee stories are not postings. Live runs: Equinor ASA 11 -> 0, KIWI Norge AS
+ATS root. Menu labels, programme pages, FAQs and employee stories are not postings.
+**Where jobs are read (step 2 of the November round).** Only from the company's own careers/jobs page: a page on the confirmed
+site, or the page on a job platform (Teamtailor, Webcruiter, Jobylon, ReachMee, Workday, ...) that the site links to as its careers
+page, directly from the homepage or one hop from its own careers page. An ad whose own structured data names another employer is
+skipped. Workday career sites build their list with scripts, so they are read through the public JSON endpoint the site's own page
+calls (`POST /wday/cxs/<tenant>/<site>/jobs`, then one `GET` per posting for the start date, closing date, public URL and hiring
+organisation; `robots.txt` honoured, 1 request/s, the first 12 postings). A posting is kept only when its hiring organisation is the
+company itself (legal name equal, ignoring legal form and numeric codes such as "1200"), so sister companies on the same tenant
+(e.g. Equinor Polska) and postings without a named employer are not published. Closing dates in the future are now kept (they were
+wrongly discarded as "future" dates). The NAV Arbeidsplassen source and the `--nav-search` flag are removed. Live runs: Equinor ASA 11 -> 0, KIWI Norge AS
 7 -> 0 (menu items and employee stories), Lerøy Seafood AS 12 -> 0 (menu pages such as "Fagområder", "Mennesker"); no genuine posting
 was lost in the 60-company sample.
 
