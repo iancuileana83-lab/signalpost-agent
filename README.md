@@ -103,9 +103,25 @@ always preferred to a wrong one. Full rules and before/after runs: `docs/REVISIO
 - **No narrative trends.** `year_over_year` is figures only: two consecutive 12-month periods, same accounts type
   and currency, otherwise `comparable: false` with the reason. The only trend sentence restates the revenue
   numbers and their arithmetic difference. The old "appears to be hiring" inference is gone.
-- **Comparison view.** `--html DIR` writes one page with a card per company plus a side-by-side comparison of up
-  to four ticked companies (accounts year and freshness, revenue, results, equity, assets, employees, website,
-  source link). Envelopes that fail to render show an error card instead of breaking the page.
+- **Viewer.** `--html DIR` writes one static, self-contained page (no server, no external requests) that works on
+  laptop and phone. Live copy: https://iancuileana83-lab.github.io/signalpost-agent/
+  - *Find:* search by name or organisation number; the count updates, and a search with no hit shows
+    "No companies match your search" with a button that clears search and filters.
+  - *Sort and filter:* sort by **Most information first** (the default: website, news, job postings and latest
+    accounts count one point each, ties broken by news + postings, then A-Z), Name A-Z, revenue, accounts year or
+    employees; unknown values always sort last and are never treated as 0. Filters: has website, has news, has job
+    postings, latest accounts filed.
+  - *Badges:* green with a tick when present ("✓ website", "✓ 3 news", "✓ 10 jobs", "✓ latest accounts"); dashed amber
+    with a cross when missing ("✕ no website", "✕ no news", "✕ no jobs", "✕ no accounts", "✕ accounts not the latest").
+  - *Compact cards:* name, organisation number, badges and key figures with their accounts year; the summary, what
+    could not be established, year-over-year table, news, jobs and the full fact table (value, date, state, source) sit
+    behind **Show details**.
+  - *Compare:* tick two to four companies, then Compare for a side-by-side table (accounts year and freshness,
+    revenue, results, equity, assets, employees, website, latest news, job postings), optionally differences only.
+  - *Sources:* every source is a large tappable pill labelled with what it is (register entry, annual accounts,
+    roles, workplaces, Wikidata, company website, careers page, job platform, news article, news feed), with host
+    and retrieval date, so two pills from the same site can be told apart. Every fact and news item shows its date.
+  - Envelopes that fail to render show an error card instead of breaking the page.
 
 ## Refresh
 

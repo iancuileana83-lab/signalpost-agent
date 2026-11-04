@@ -83,3 +83,28 @@ Trafikkskole AS a WordPress comment-feed item -> none; Lerøy Seafood AS 4+ `las
 Tests: `tests/test_ownership.py` (21 tests, fake fetcher, no network): copyright / impressum owners, subsidiary and org-number
 exceptions, brand-owner lookup, group site yields no social / news / jobs, social handle rules, `sameAs`, Atom `updated`,
 identical-timestamp feeds, comment feeds, sitemap `lastmod`, undated and listing pages, menu-label headlines, careers menu links vs JSON-LD / ATS ad pages.
+
+## Viewer and UX changes (revision 3)
+
+The viewer (`--html DIR`, live at https://iancuileana83-lab.github.io/signalpost-agent/) was reworked so a person can find a
+company, compare two and check a source on laptop and phone:
+
+- **Search and empty state:** search by name or organisation number; no hit shows "No companies match your search" and a
+  "Clear search and filters" button.
+- **Sort:** "Most information first" is the default (one point each for website, news, job postings, latest accounts; half a
+  point for accounts that are not the latest; ties by news + postings, then A-Z). Also Name A-Z, revenue (both ways),
+  accounts year, employees. Unknown values go last and are never treated as 0.
+- **Filter:** has website / news / job postings / latest accounts.
+- **Badges:** present = green with a tick; missing says so ("no website", "no news", "no jobs", "no accounts", "accounts not
+  the latest (FYxxxx)"), dashed amber with a cross, never a neutral grey.
+- **Compact cards:** name, organisation number, badges, key figures labelled with the accounts year. Summary, unknowns,
+  year-over-year table, news, jobs and the full dated fact table are behind "Show details".
+- **Compare:** two to four companies side by side, now including latest news and job postings; differences-only toggle.
+- **Labelled sources:** each source pill states its kind (register entry, annual accounts, roles, workplaces, Wikidata, company
+  website, careers page, job platform, news article, news feed) plus host and date; every fact and news item carries a date.
+- **Layout:** 44 px tap targets, sticky search bar, stacked facts table below 640 px.
+- **Related rules in this round:** register change records are no longer news; social links come only from the footer of the
+  confirmed own website; jobs come only from the company's own careers page, including the job platform it links to and
+  Workday's public JSON endpoint (employer-only); the NAV source and `--nav-search` flag were removed.
+
+Tests: 62 in total, including viewer, badge, compact-card and source-label tests.
