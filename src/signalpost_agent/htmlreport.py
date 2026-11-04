@@ -66,6 +66,9 @@ details.facts{margin-top:1rem}details.facts>summary{cursor:pointer;min-height:44
 #cmpout td:first-child{position:sticky;left:0;background:var(--bg);min-width:7.5rem;max-width:9rem;z-index:1;font-weight:600}
 #cmpout tr.diff td:not(:first-child){background:color-mix(in srgb,var(--warn) 9%,transparent)}
 #cmpout .src{min-height:36px}
+#cmpout .cur{display:inline-block;font-weight:700;font-size:.8em;padding:0 .4rem;margin-right:.3rem;border-radius:6px;background:color-mix(in srgb,var(--acc) 16%,transparent);color:var(--acc)}
+#cmpnote{margin:.6rem 0;padding:.6rem .8rem;border:1px solid var(--warn);border-radius:8px;color:var(--warn);font-weight:600}
+#cmpout a.lnk{color:var(--acc)}
 @media (max-width:640px){
   main{padding:.5rem .6rem 7rem}article{padding:.8rem;border-radius:8px}
   .head{flex-direction:column;gap:.4rem}label.pick{align-self:stretch;justify-content:center}
@@ -176,8 +179,19 @@ def compare_row(env: dict) -> dict[str, Any]:
     row["Verified website"] = (site.get("value") or {}).get("url", "") if site else (
         f"none verified (group site {group['value'].get('candidate_url')} withheld)" if group else "none verified")
     row["Latest news"] = _latest_news_text(env)
-    row["Job postings"] = str(len(_job_values(env))) if _job_values(env) else "none found"
+    jobs = _job_values(env)
+    row["Job postings"] = f"{len(jobs)} posting{'s' if len(jobs) != 1 else ''}" if jobs else "none found"
     return row
+
+
+def compare_meta(env: dict) -> dict[str, Any]:
+    """What the comparison needs besides the display text: the accounts currency, the link of the latest news article and whether
+    there is a list of postings to open, so every row can be checked at its source."""
+    latest = _latest_accounts(env)
+    news = _news_values(env)
+    url = str(news[0].get("url", "")) if news else ""
+    return {"currency": ((latest or {}).get("value", {}).get("currency") or "NOK") if latest else "",
+            "news_url": url if url.startswith("http") else "", "jobs": len(_job_values(env))}
 
 
 def _news_values(env: dict) -> list[dict]:
@@ -279,7 +293,7 @@ def _jobs_list(env: dict) -> str:
     rows = "".join(f'<li><time>{html.escape(v["date_posted"]) if v.get("date_posted") else "date not shown"}</time> '
                    + (f'<a href="{html.escape(v["url"])}" target="_blank" rel="noopener">{html.escape(v["title"])}</a>' if str(v.get("url", "")).startswith("http")
                       else html.escape(v["title"])) + "</li>" for v in items)
-    return f"<h3>Job postings</h3><ul class=feed>{rows}</ul>"
+    return f"<h3 class=\"jobs-h\">Job postings</h3><ul class=feed>{rows}</ul>"
 
 
 def _claim_date(c: dict, evidence: dict, fallback: str) -> tuple[str, str]:
@@ -382,9 +396,15 @@ function syncTray() {
   traytext.textContent = p.length < 2 ? (p.length ? label(p[0]) + ' · tick one more company to compare' : '') : p.map(label).join(' vs ');
   open_.disabled = p.length < 2;
 }
+const MONEY = ['Operating revenue', 'Operating result', 'Annual result', 'Total assets', 'Equity'];
+function link(td, text, href) {
+  const a = document.createElement('a'); a.className = 'lnk'; a.href = href; a.target = '_blank'; a.rel = 'noopener';
+  a.textContent = text + ' \u2197'; td.appendChild(a);
+}
 function renderCompare() {
   const sel = picked().map(o => rows[o]).filter(Boolean), keys = [];
-  sel.forEach(r => Object.keys(r).forEach(k => { if (!keys.includes(k)) keys.push(k); }));
+  sel.forEach(r => Object.keys(r).forEach(k => { if (k !== '_meta' && !keys.includes(k)) keys.push(k); }));
+  const cur = [...new Set(sel.map(r => (r._meta || {}).currency).filter(Boolean))];
   const t = document.createElement('table');
   keys.forEach(k => {
     const vals = sel.map(r => r[k] === undefined ? 'n/a' : String(r[k]));
@@ -392,15 +412,37 @@ function renderCompare() {
     if (diff.checked && !differs && k !== 'Company') return;
     const tr = t.insertRow(); if (differs && k !== 'Company') tr.className = 'diff';
     const th = tr.insertCell(); th.textContent = k;
-    vals.forEach(v => {
-      const td = tr.insertCell();
-      if (/^https?:\\/\\//.test(v)) {
+    vals.forEach((v, i) => {
+      const td = tr.insertCell(), m = (sel[i]._meta || {}), org = picked()[i];
+      const money = MONEY.includes(k) && /^[A-Z]{3} /.test(v);
+      if (/^https?:\/\//.test(v)) {
         const a = document.createElement('a'); a.className = 'src'; a.href = v; a.target = '_blank'; a.rel = 'noopener';
-        a.textContent = new URL(v).hostname.replace(/^www\\./, '') + ' \\u2197'; td.appendChild(a);
+        a.textContent = new URL(v).hostname.replace(/^www\./, '') + ' \u2197'; td.appendChild(a);
+      } else if (money) {
+        const c = document.createElement('span'); c.className = 'cur'; c.textContent = v.slice(0, 3); td.append(c, v.slice(4));
+      } else if (k === 'Latest news' && m.news_url) {
+        link(td, v, m.news_url);
+      } else if (k === 'Job postings' && m.jobs) {
+        const a = document.createElement('a'); a.className = 'lnk'; a.href = '#'; a.textContent = v + ' \u2013 show the list';
+        a.addEventListener('click', e => { e.preventDefault(); showJobs(org); }); td.appendChild(a);
       } else td.textContent = v;
     });
   });
-  const wrap = document.createElement('div'); wrap.className = 'scroll'; wrap.appendChild(t); out.replaceChildren(wrap);
+  const wrap = document.createElement('div'); wrap.className = 'scroll'; wrap.appendChild(t);
+  const parts = [];
+  if (cur.length > 1) {
+    const n = document.createElement('div'); n.id = 'cmpnote'; n.setAttribute('role', 'note');
+    n.textContent = 'Figures are in different currencies (' + cur.join(' vs ') + ') and are not directly comparable.'; parts.push(n);
+  }
+  out.replaceChildren(...parts, wrap);
+}
+function showJobs(org) {
+  closeCompare();
+  const card = cards.find(c => c.dataset.org === org); if (!card) return;
+  card.hidden = false;
+  const btn = card.querySelector('.toggle'), more = document.getElementById(btn.getAttribute('aria-controls'));
+  if (more.hidden) btn.click();
+  (card.querySelector('.jobs-h') || card).scrollIntoView({block: 'start'});
 }
 function openCompare() { renderCompare(); panel.hidden = false; document.body.classList.add('lock'); $('cmpclose').focus(); }
 function closeCompare() { panel.hidden = true; document.body.classList.remove('lock'); open_.focus(); }
@@ -428,7 +470,7 @@ def write_html(directory: Path, envelopes: list[dict]) -> None:
     for env in envelopes:
         try:
             cards.append(_card(env))
-            data[str(env.get("organisation_number", ""))] = compare_row(env)
+            data[str(env.get("organisation_number", ""))] = {**compare_row(env), "_meta": compare_meta(env)}
         except Exception as exc:  # noqa: BLE001 - one odd envelope must not take down the whole report
             cards.append(_error_card(env, exc))
     payload = json.dumps(data, ensure_ascii=False).replace("<", "\\u003c").replace(">", "\\u003e").replace("&", "\\u0026")

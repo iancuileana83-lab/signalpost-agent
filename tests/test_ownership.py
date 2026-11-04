@@ -603,3 +603,16 @@ def test_sources_are_labelled_by_what_they_are():
     b = _link("https://data.brreg.no/regnskapsregisteret/regnskap/914778271", "2026-11-04T10:00:00Z")
     assert 'class="k">register entry</span>' in a and 'class="k">annual accounts</span>' in b
     assert "data.brreg.no · 2026-11-04" in a and "data.brreg.no · 2026-11-04" in b  # same site and date, different label
+
+
+def test_comparison_meta_carries_currency_news_link_and_posting_count_and_viewer_script_uses_them(tmp_path):
+    from test_core import _accounts, _run
+    from signalpost_agent.htmlreport import compare_meta, compare_row, write_html
+    env = _run({"sisteInnsendteAarsregnskap": "2025"}, _accounts(2024, 2025, revenue={2024: 200, 2025: 150}))
+    meta = compare_meta(env)
+    assert meta["currency"] == "NOK" and meta["news_url"] == "" and meta["jobs"] == 0
+    assert compare_row(env)["Job postings"] == "none found"
+    write_html(tmp_path, [env])
+    page = (tmp_path / "index.html").read_text(encoding="utf-8")
+    assert "are not directly comparable" in page and "different currencies" in page and 'id = \'cmpnote\'' in page
+    assert "m.news_url" in page and "showJobs" in page and '"_meta"' in page

@@ -118,6 +118,9 @@ always preferred to a wrong one. Full rules and before/after runs: `docs/REVISIO
     behind **Show details**.
   - *Compare:* tick two to four companies, then Compare for a side-by-side table (accounts year and freshness,
     revenue, results, equity, assets, employees, website, latest news, job postings), optionally differences only.
+    When the companies report in different currencies (e.g. USD vs NOK) a note above the figures says they are not
+    directly comparable and each money cell carries its currency tag. Latest news is a link to the article and
+    "10 postings" opens that company's dated list of postings, so every row can be checked at a source.
   - *Sources:* every source is a large tappable pill labelled with what it is (register entry, annual accounts,
     roles, workplaces, Wikidata, company website, careers page, job platform, news article, news feed), with host
     and retrieval date, so two pills from the same site can be told apart. Every fact and news item shows its date.

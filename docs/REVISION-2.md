@@ -100,6 +100,9 @@ company, compare two and check a source on laptop and phone:
 - **Compact cards:** name, organisation number, badges, key figures labelled with the accounts year. Summary, unknowns,
   year-over-year table, news, jobs and the full dated fact table are behind "Show details".
 - **Compare:** two to four companies side by side, now including latest news and job postings; differences-only toggle.
+- **Compare, checkable rows:** a note "Figures are in different currencies (USD vs NOK) and are not directly comparable" appears
+  above the figures when the selected companies differ, and every money cell shows its currency tag; the latest-news cell links to
+  the article and the job-postings cell ("10 postings") opens the company's list of postings.
 - **Labelled sources:** each source pill states its kind (register entry, annual accounts, roles, workplaces, Wikidata, company
   website, careers page, job platform, news article, news feed) plus host and date; every fact and news item carries a date.
 - **Layout:** 44 px tap targets, sticky search bar, stacked facts table below 640 px.
