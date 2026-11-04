@@ -616,3 +616,14 @@ def test_comparison_meta_carries_currency_news_link_and_posting_count_and_viewer
     page = (tmp_path / "index.html").read_text(encoding="utf-8")
     assert "are not directly comparable" in page and "different currencies" in page and 'id = \'cmpnote\'' in page
     assert "m.news_url" in page and "showJobs" in page and '"_meta"' in page
+
+
+def test_comparison_panel_header_is_pinned_and_only_the_table_scrolls_sideways(tmp_path):
+    from test_core import _accounts, _run
+    from signalpost_agent.htmlreport import write_html
+    write_html(tmp_path, [_run({"sisteInnsendteAarsregnskap": "2025"}, _accounts(2024, 2025, revenue={2024: 200, 2025: 150}))])
+    page = (tmp_path / "index.html").read_text(encoding="utf-8")
+    assert "#cmp{position:fixed;top:0;left:0;right:0;bottom:0;width:100%;max-width:100%" in page and "display:flex;flex-direction:column" in page
+    assert "#cmp .top{flex:0 0 auto" in page and "#cmpout{flex:1 1 auto;min-height:0;min-width:0" in page and "#cmpout .scroll{max-width:100%;overflow-x:auto}" in page
+    assert "#cmpnote{max-width:100%;overflow-wrap:anywhere" in page and "#traytext{flex:1 1 12rem;min-width:0;max-width:100%" in page
+    assert "html,body{max-width:100%;overflow-x:hidden}" in page

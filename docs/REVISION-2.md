@@ -105,6 +105,8 @@ company, compare two and check a source on laptop and phone:
   the article and the job-postings cell ("10 postings") opens the company's list of postings.
 - **Labelled sources:** each source pill states its kind (register entry, annual accounts, roles, workplaces, Wikidata, company
   website, careers page, job platform, news article, news feed) plus host and date; every fact and news item carries a date.
+- **No horizontal overflow:** the comparison panel is a fixed column (pinned header with Close, scrolling body) and only the table
+  scrolls sideways inside its own box; the currency note and the compare bar wrap. Checked at 1900, 1366 and 390 px.
 - **Layout:** 44 px tap targets, sticky search bar, stacked facts table below 640 px.
 - **Related rules in this round:** register change records are no longer news; social links come only from the footer of the
   confirmed own website; jobs come only from the company's own careers page, including the job platform it links to and

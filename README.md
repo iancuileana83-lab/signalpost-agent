@@ -124,6 +124,8 @@ always preferred to a wrong one. Full rules and before/after runs: `docs/REVISIO
   - *Sources:* every source is a large tappable pill labelled with what it is (register entry, annual accounts,
     roles, workplaces, Wikidata, company website, careers page, job platform, news article, news feed), with host
     and retrieval date, so two pills from the same site can be told apart. Every fact and news item shows its date.
+  - *Layout guarantee:* nothing extends past the screen width (checked at 1900, 1366 and 390 px): the comparison header with
+    Close stays pinned and fully visible, the currency note wraps, and the table scrolls inside its own box; the compare bar wraps its text.
   - Envelopes that fail to render show an error card instead of breaking the page.
 
 ## Refresh
