@@ -63,6 +63,46 @@ def search_names(fetcher: Fetcher, case: Case, name: str) -> list[tuple[str, str
     return [(str(r.get("organisasjonsnummer")), str(r.get("navn"))) for r in rows or [] if isinstance(r, dict) and r.get("navn")]
 
 
+def _registry_extras(case: Case, body: dict, evid) -> None:
+    """Further facts from the same Enhetsregisteret record (looked up by organisation number, so always this entity).
+    Phone numbers and e-mail addresses are not published: for sole traders they are personal data."""
+    post = _address(body.get("postadresse"))
+    if post:
+        case.claim("postal_address", post, "available", [evid(f"postadresse: {post}")], confidence=1.0, section="1")
+    activity = " ".join(str(a).strip() for a in (body.get("vedtektsfestetFormaal") or body.get("aktivitet") or []) if str(a).strip())
+    if activity:
+        key = "vedtektsfestetFormaal" if body.get("vedtektsfestetFormaal") else "aktivitet"
+        case.claim("registered_activity", activity[:600], "available", [evid(f"{key}: {activity[:200]}")], confidence=1.0, section="1",
+                   note="The company's own registered statement of its business or purpose")
+    for i, hist in enumerate(body.get("historiskeNavn") or []):
+        if isinstance(hist, dict) and hist.get("navn"):
+            value = {"name": hist["navn"], "from": (hist.get("fraDato") or "")[:10] or None, "to": (hist.get("tilDato") or "")[:10] or None}
+            case.claim("former_name", value, "available", [evid(f"historiskeNavn: {hist['navn']} ({value['from']} to {value['to']})")],
+                       key=str(i), confidence=1.0, section="1", effective_date=value["to"])
+    capital = body.get("kapital")
+    if isinstance(capital, dict) and capital.get("belop") is not None:
+        value = {"amount": capital.get("belop"), "currency": capital.get("valuta"), "type": capital.get("type"),
+                 "shares": capital.get("antallAksjer"), "since": capital.get("innfortDato")}
+        case.claim("share_capital", value, "available", [evid(f"kapital: {capital.get('belop')} {capital.get('valuta')} ({capital.get('type')})")],
+                   confidence=1.0, section="2", effective_date=capital.get("innfortDato"))
+    sector = body.get("institusjonellSektorkode")
+    if isinstance(sector, dict) and sector.get("kode"):
+        case.claim("institutional_sector", {"code": sector["kode"], "description": sector.get("beskrivelse")}, "available",
+                   [evid(f"institusjonellSektorkode: {sector['kode']} {sector.get('beskrivelse')}")], confidence=1.0, section="1")
+    registers = {}
+    for flag, name, date_key in (("registrertIMvaregisteret", "vat_register", "registreringsdatoMerverdiavgiftsregisteret"),
+                                 ("registrertIForetaksregisteret", "business_register", "registreringsdatoForetaksregisteret"),
+                                 ("registrertIFrivillighetsregisteret", "voluntary_register", None),
+                                 ("registrertIStiftelsesregisteret", "foundation_register", None)):
+        if flag in body:
+            registers[name] = {"registered": bool(body[flag]), "since": body.get(date_key) if date_key and body[flag] else None}
+    if registers:
+        case.claim("register_memberships", registers, "available",
+                   [evid("; ".join(f"{k}: {v['registered']}" for k, v in registers.items()))], confidence=1.0, section="1")
+    if body.get("vedtektsdato"):
+        case.claim("articles_date", body["vedtektsdato"], "available", [evid(f"vedtektsdato: {body['vedtektsdato']}")], confidence=1.0, section="1")
+
+
 def fetch_entity(fetcher: Fetcher, case: Case) -> dict | None:
     """Fetch the live entity record; returns the JSON body or None. Emits the identity claims."""
     url = ENTITY.format(org=case.org)
@@ -90,10 +130,14 @@ def fetch_entity(fetcher: Fetcher, case: Case) -> dict | None:
     status = "active"
     if body.get("konkurs"):
         status = "bankrupt"
-    elif body.get("underAvvikling") or body.get("underTvangsavviklingEllerTvangsopploesning"):
+    elif body.get("underAvvikling"):
         status = "in_liquidation"
+    elif body.get("underTvangsavviklingEllerTvangsopplosning") or body.get("underTvangsavviklingEllerTvangsopploesning"):
+        status = "in_forced_liquidation"
     case.claim("registry_status", status, "available",
-               [evid(f"konkurs: {body.get('konkurs')}; underAvvikling: {body.get('underAvvikling')}")], confidence=1.0, section="1")
+               [evid(f"konkurs: {body.get('konkurs')}; underAvvikling: {body.get('underAvvikling')}; "
+                     f"underTvangsavviklingEllerTvangsopplosning: {body.get('underTvangsavviklingEllerTvangsopplosning')}")],
+               confidence=1.0, section="1")
     for i in (1, 2, 3):
         code = body.get(f"naeringskode{i}")
         if isinstance(code, dict) and code.get("kode"):
@@ -125,6 +169,7 @@ def fetch_entity(fetcher: Fetcher, case: Case) -> dict | None:
     if body.get("hjemmeside"):
         case.claim("registry_declared_website", body["hjemmeside"], "available", [evid(f"hjemmeside: {body['hjemmeside']}")],
                    confidence=1.0, section="4")
+    _registry_extras(case, body, evid)
     declared = body.get("sisteInnsendteAarsregnskap")
     if declared:
         case.notes["latest_filing_year"] = str(declared)

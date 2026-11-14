@@ -625,3 +625,50 @@ def test_comparison_panel_header_is_pinned_and_only_the_table_scrolls_sideways(t
     assert "#cmp .top{flex:0 0 auto" in page and "#cmpout{flex:1 1 auto;min-height:0;min-width:0" in page and "#cmpout .scroll{max-width:100%;overflow-x:auto}" in page
     assert "#cmpnote{max-width:100%;overflow-wrap:anywhere" in page and "#traytext{flex:1 1 12rem;min-width:0;max-width:100%" in page
     assert "html,body{max-width:100%;overflow-x:hidden}" in page
+
+
+# ----- 7. revision 4: when in doubt, leave it out ---------------------------------------------------------------
+def test_registry_site_branded_with_the_parent_group_name_is_not_published():
+    # ORKLA HOME & PERSONAL CARE AS declares orkla.com; the site calls itself "Orkla", the exact name of ORKLA ASA.
+    search = json.dumps({"_embedded": {"enheter": [{"organisasjonsnummer": "910747711", "navn": "ORKLA ASA"}]}})
+    fetcher = SiteFake({"https://orkla.example/": html("Orkla", "<p>Orkla</p>", '<meta property="og:site_name" content="Orkla">'),
+                        "https://data.brreg.no/enhetsregisteret/api/enheter?navn=orkla&size=20": search})
+    case = case_named("ORKLA HOME & PERSONAL CARE AS")
+    web_phase(fetcher, case, {"hjemmeside": "orkla.example"}, None, max_guesses=0)
+    assert not claims(case, "official_website") and not claims(case, "registry_declared_website") and not claims(case, "public_brand")
+
+
+def test_registry_sub_page_of_a_shared_site_is_not_the_company_homepage():
+    fetcher = SiteFake({"https://acme.example/": html("Acme Norge", "<p>Acme Norge</p>")})
+    case = case_named("ACME NORGE AS")
+    web_phase(fetcher, case, {"hjemmeside": "acme.example/home-care/"}, None, max_guesses=0)
+    assert not claims(case, "official_website")
+    # ... unless the site shows our organisation number
+    fetcher = SiteFake({"https://acme.example/": html("Acme Norge", f"<p>Acme Norge AS org.nr {ORG}</p>")})
+    case = case_named("ACME NORGE AS")
+    web_phase(fetcher, case, {"hjemmeside": "acme.example/home-care/"}, None, max_guesses=0)
+    assert claims(case, "official_website")[0]["value"]["identity_proof"] == "org_number_on_site"
+
+
+def test_site_stating_another_entitys_org_number_is_not_used():
+    fetcher = SiteFake({"https://acme.example/": html("Acme Norge", "<footer>Acme Norge – Org.nr. 976 967 631</footer>")})
+    case = case_named("ACME NORGE AS")
+    web_phase(fetcher, case, {"hjemmeside": "acme.example"}, None, max_guesses=0)
+    assert not claims(case, "official_website") and not claims(case, "registry_declared_website")
+
+
+def test_registry_extras_and_forced_liquidation_status():
+    from signalpost_agent import official
+    body = {"organisasjonsnummer": ORG, "navn": "ACME AS", "organisasjonsform": {"kode": "AS"}, "underTvangsavviklingEllerTvangsopplosning": True,
+            "postadresse": {"adresse": ["Postboks 1"], "postnummer": "0101", "poststed": "OSLO", "land": "Norge"},
+            "aktivitet": ["Handel med varer."], "historiskeNavn": [{"navn": "GAMMEL AS", "fraDato": "2001-01-01 00:00", "tilDato": "2010-01-01 00:00"}],
+            "kapital": {"belop": 30000.0, "valuta": "NOK", "type": "Aksjekapital"}, "registrertIMvaregisteret": True}
+    fetcher = SiteFake({f"https://data.brreg.no/enhetsregisteret/api/enheter/{ORG}": json.dumps(body)})
+    case = Case(ORG)
+    official.fetch_entity(fetcher, case)
+    assert claims(case, "registry_status")[0]["value"] == "in_forced_liquidation"
+    assert claims(case, "registered_activity")[0]["value"] == "Handel med varer."
+    assert claims(case, "former_name")[0]["value"] == {"name": "GAMMEL AS", "from": "2001-01-01", "to": "2010-01-01"}
+    assert claims(case, "share_capital")[0]["value"]["amount"] == 30000.0
+    assert claims(case, "register_memberships")[0]["value"]["vat_register"]["registered"] is True
+    assert claims(case, "postal_address")

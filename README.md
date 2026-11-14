@@ -72,6 +72,12 @@ A website is published only when:
 - the site shows the exact company name **and** the registered Norwegian street address with postcode on the same page.
 
 A site that states another entity's organisation number and never ours is that entity's site and is not used.
+A site whose brand is only part of our legal name while another registered entity carries exactly that name
+(`orkla.com` for ORKLA HOME & PERSONAL CARE AS is ORKLA ASA's) is a group site, also when the registry declares it;
+and a registry `hjemmeside` that is a sub-page of a shared domain (`orkla.no/home-personal-care/`) is accepted only
+when the site shows our organisation number. Registry facts added from the same record (by org number): postal
+address, registered activity/purpose, former names, share capital, institutional sector, register memberships
+(VAT, business register ...) and articles date; phone and e-mail are deliberately not published.
 Phone numbers, e-mail domains and people's names no longer prove anything. Withheld candidates are never published,
 not even as an `ambiguous` value. Social profiles must be on the verified site **and** their handle must be the
 company's legal name (optionally plus its legal form); handles with a manager, group, country or other word

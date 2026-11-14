@@ -265,7 +265,7 @@ def assess_site_scope(fetcher: Fetcher, case: Case, ctx: "SiteContext", legal_na
     if proof == "legal_name_and_address_match" and not branded:
         return {"scope": "group", "owner": None, "reason": "the site's own name does not carry the company name, so it is a brand or group site",
                 "evidence": (ctx.home_resp.final_url, "company_owned", ctx.home_resp.sha256, ctx.home.title[:200], "site_brand_differs_from_legal_name")}
-    if proof != "org_number_on_site" and source != "registry":
+    if proof != "org_number_on_site":  # registry-declared too: orkla.com for ORKLA HOME & PERSONAL CARE AS is ORKLA ASA's site
         # The site brand is only part of the legal name ("Statkraft" vs "Statkraft Energi AS"): who else is registered under that name?
         brand = site_brand_tokens(ctx, legal_name)
         if brand and brand != name_tokens(legal_name) and len("".join(brand)) >= 4:
@@ -443,6 +443,10 @@ def resolve_website(fetcher: Fetcher, case: Case, entity: dict | None, legal_nam
 
     if entity:
         add("registry", entity.get("hjemmeside"))
+    raw_declared = str((entity or {}).get("hjemmeside") or "").strip()
+    _parts = urllib.parse.urlsplit(raw_declared if re.match(r"^[a-z]+://", raw_declared, re.I) else "https://" + raw_declared)
+    declared_host = registered_host(_parts.hostname or "")
+    declared_path = _parts.path.strip("/")
     if wikidata and wikidata.get("website"):
         add("wikidata", wikidata["website"])
     if entity and entity.get("epostadresse") and "@" in entity["epostadresse"]:
@@ -463,6 +467,12 @@ def resolve_website(fetcher: Fetcher, case: Case, entity: dict | None, legal_nam
             response: Response = result["response"]
             ctx: SiteContext = result["ctx"]
             scope = assess_site_scope(fetcher, case, ctx, legal_name, result["proof"], source, result.get("branded", True))
+            if (scope["scope"] == "own" and source == "registry" and declared_path and result["proof"] != "org_number_on_site"
+                    and ctx.host == declared_host):
+                # The registry points at a sub-page (orkla.no/home-personal-care/, festivaldrift.no/countryfestivalen): the domain is
+                # shared with a group or service provider, so its homepage, profiles, news and jobs are not this company's.
+                scope = {"scope": "group", "owner": None,
+                         "reason": f"the registry declares a sub-page (/{declared_path}) of a shared site, and the site does not show organisation number {org}"}
             if scope["scope"] == "group":
                 attempts[-1] += ":group_site"
                 if best_group is None:
