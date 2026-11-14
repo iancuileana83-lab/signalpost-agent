@@ -316,7 +316,7 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--site-interval", type=float, default=1.0, help="seconds between requests to the same company host")
     p.add_argument("--retries", type=int, default=2)
     p.add_argument("--timeout", type=float, default=10.0)
-    p.add_argument("--max-guesses", type=int, default=7, help="name-derived domain candidates to try per company")
+    p.add_argument("--max-guesses", type=int, default=7, help="ignored: no domain is ever guessed from the company name (kept for command compatibility)")
     p.add_argument("--company-budget-seconds", type=float, default=60.0, help="max wall time spent on web research per company")
     p.add_argument("--no-web", action="store_true", help="official registers only")
     p.add_argument("--no-wikidata", action="store_true")

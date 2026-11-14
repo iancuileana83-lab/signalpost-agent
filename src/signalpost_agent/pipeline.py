@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import time
+import urllib.parse
 from datetime import date
 from typing import Any
 
@@ -84,6 +85,7 @@ def web_phase(fetcher: Fetcher, case: Case, entity: dict | None, wikidata: dict 
         case.error("website", f"{type(exc).__name__}: {exc}")
         found = None
         case.claim("official_website", None, "failed", [], note="Unexpected error while resolving the website", section="4")
+    _gate_registry_website(case, found)
     have_profiles: set[str] = set()
     if found:
         ctx = found["ctx"]
@@ -134,6 +136,23 @@ def web_phase(fetcher: Fetcher, case: Case, entity: dict | None, wikidata: dict 
         case.claim("company_profile", None, "not_available", [], key="any",
                    note="No confirmed own website, so no footer to read social links from", section="4")
     return outcome
+
+
+def _gate_registry_website(case: Case, found: dict[str, Any] | None) -> None:
+    """The registry's hjemmeside is published only when the site itself confirmed it (it carries the company's name or number);
+    a declared site that turned out to be the housing manager's or parent's (usbl.no, obos.no) is withheld."""
+    site = next((c for c in case.claims if c["field"] == "official_website" and c["availability"] == "available"), None)
+    site_host = web.registered_host(urllib.parse.urlsplit(site["value"]["url"]).hostname or "") if site else ""
+    for claim in case.claims:
+        if claim["field"] != "registry_declared_website" or claim["availability"] != "available":
+            continue
+        declared = web.clean_site_url(str(claim["value"]))
+        host = web.registered_host(urllib.parse.urlsplit(declared or "").hostname or "")
+        if not (found and host and (host == site_host or found.get("source") == "registry")):
+            claim.update(value=None, availability="ambiguous", evidence_ids=[],
+                         note="The registry declares a homepage, but that site does not show this company's name or organisation "
+                              "number (or shows another entity's), so it is not published")
+            claim.pop("confidence", None)
 
 
 def _money(value: Any, currency: str | None) -> str:
@@ -311,21 +330,17 @@ def summarize(case: Case) -> dict[str, Any]:
                           "claims": [p["claim_key"] for p in places[:5]]})
     site = one("official_website")
     if site:
-        proof = {"org_number_on_site": "organisation number shown on the site", "registry_declared_website": "declared in the registry",
-                 "registry_contact_details_match": "name and registry contact details match"}.get(
+        proof = {"org_number_on_site": "organisation number shown on the site", "registry_declared_website": "declared in the registry and the site carries the company name",
+                 "legal_name_and_address_match": "exact name and registered address shown on the site"}.get(
                      (site["value"] or {}).get("identity_proof"), "identity checked against the registry record")
         sentences.append({"text": f"Official website {site['value']['url']} ({proof}).", "claims": [site["claim_key"]]})
         brand = one("public_brand")
         if brand and brand["value"]["differs_from_legal_name"]:
             sentences.append({"text": f"The company presents itself as \"{brand['value']['name']}\" on its own site.", "claims": [brand["claim_key"]]})
     else:
-        group = next((c for c in case.claims if c["field"] == "official_website" and isinstance(c.get("value"), dict)
-                      and c["value"].get("site_scope") == "group_site"), None)
-        if group:
-            unknowns.append(f"the only website found, {group['value']['candidate_url']}, is not this company's own site "
-                            f"({group['value']['reason']}); it is not published, and neither are its social links, news or jobs")
-        else:
-            unknowns.append("no official website could be verified for this exact entity")
+        unknowns.append("no official website could be verified for this exact entity (a site is published only when it shows the "
+                        "organisation number with the name, is declared in the registry and carries the name, or shows the exact name "
+                        "with the registered address); no domain is guessed")
     profiles = by_field.get("company_profile", [])
     if profiles:
         sentences.append({"text": "Company-owned profiles linked from its site or Wikidata: "

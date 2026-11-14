@@ -60,10 +60,23 @@ per-company web budget (60 s).
 
 ## Identity rule (why wrong-company matches are unlikely)
 
-A website is published only when the registry itself declares it, or the exact 9-digit organisation number
-is shown on the site, or the legal name is on the site **and** an entity-specific registry detail (phone,
-street + postcode, registered person's full name, registry e-mail domain) is shown there. A name match alone
-is reported as `ambiguous` and the value is withheld. Details in `docs/DESIGN.md`.
+Precision rule (revision 4): **when in doubt, leave it out.** No domain is ever guessed from the company name;
+candidate sites come only from the registry (`hjemmeside`, e-mail domain) and Wikidata items matched by org number.
+A website is published only when:
+
+- the site shows our 9-digit organisation number **and** names the company, or
+- the registry declares it **and** the site calls itself by the company's name (a non-generic, contiguous part of
+  the legal name: "KONGSBERG" for KONGSBERG GRUPPEN ASA). A declared site that does not, such as the housing
+  manager's `usbl.no` / `obos.no` / `vestbo.no` for a borettslag or `privatmegleren.no` for a holding company, is withheld,
+  and so is the registry's `hjemmeside` value itself; or
+- the site shows the exact company name **and** the registered Norwegian street address with postcode on the same page.
+
+A site that states another entity's organisation number and never ours is that entity's site and is not used.
+Phone numbers, e-mail domains and people's names no longer prove anything. Withheld candidates are never published,
+not even as an `ambiguous` value. Social profiles must be on the verified site **and** their handle must be the
+company's legal name (optionally plus its legal form); handles with a manager, group, country or other word
+(`boligbyggelaget_usbl`, `telenornorge`) are dropped. Job postings need a posting date and a URL, and expired ones are
+dropped; news needs its own publish date and must name the company. Details in `docs/DESIGN.md`.
 
 ## Own site, own profiles, real news (added in revision 2)
 

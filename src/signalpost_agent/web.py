@@ -15,11 +15,11 @@ from email.utils import parsedate_to_datetime
 from typing import Any
 
 from . import official
-from .htmlx import Page, find_org_numbers, ld_types, parse_html
+from .htmlx import Page, find_org_numbers, labelled_org_numbers, ld_types, parse_html
 from .http import Fetcher, Response
 from .model import Case
 
-LEGAL_SUFFIXES = {"as", "asa", "ans", "da", "sa", "ks", "nuf", "enk", "iks", "sf", "ba", "stiftelse", "foretak"}
+LEGAL_SUFFIXES = {"as", "asa", "ans", "da", "sa", "ks", "nuf", "enk", "iks", "sf", "ba", "stiftelse", "foretak", "hf", "kf", "fkf", "sa"}
 FREE_MAIL = {"gmail.com", "hotmail.com", "hotmail.no", "outlook.com", "outlook.no", "live.com", "live.no", "yahoo.com", "yahoo.no",
              "icloud.com", "me.com", "online.no", "broadpark.no", "getmail.no", "start.no", "c2i.net", "frisurf.no", "powertech.no",
              "lyse.net", "altibox.no", "telenor.com", "telenormail.no", "msn.com", "protonmail.com", "proton.me", "gmx.com", "hotmail.se",
@@ -262,7 +262,7 @@ def assess_site_scope(fetcher: Fetcher, case: Case, ctx: "SiteContext", legal_na
             name, span = hit
             return {"scope": "group", "owner": name, "reason": f'the site names another legal entity, "{name}", as its owner or publisher',
                     "evidence": (url, "company_owned", resp.sha256, span, "other_legal_owner_named_on_site")}
-    if proof == "registry_contact_details_match" and not branded:
+    if proof == "legal_name_and_address_match" and not branded:
         return {"scope": "group", "owner": None, "reason": "the site's own name does not carry the company name, so it is a brand or group site",
                 "evidence": (ctx.home_resp.final_url, "company_owned", ctx.home_resp.sha256, ctx.home.title[:200], "site_brand_differs_from_legal_name")}
     if proof != "org_number_on_site" and source != "registry":
@@ -276,7 +276,7 @@ def assess_site_scope(fetcher: Fetcher, case: Case, ctx: "SiteContext", legal_na
                             "evidence": (official.NAME_SEARCH.split("?")[0], "official_registry", None, f"{other_org} {other_name}",
                                          "brreg_exact_name_of_other_entity")}
     basis = {"org_number_on_site": "organisation number shown on the site", "registry_declared_website": "declared in the registry"}.get(
-        proof, "name and registry contact details match, and the site is branded with the company name")
+        proof, "exact name and registered address shown on the site, and the site is branded with the company name")
     return {"scope": "own", "basis": basis + "; no other legal entity named as the site's owner"}
 
 
@@ -332,25 +332,36 @@ def verify_candidate(fetcher: Fetcher, case: Case, url: str, org: str, tokens: l
             if proof:
                 proof_url = sub.final_url
                 break
-    if proof:
-        result.update(state="verified", proof="org_number_on_site", span=proof, proof_url=proof_url)
+    others = set().union(*(labelled_org_numbers(p.text) for p, _r in ctx.pages.values())) - {org}
+    if others and not proof:
+        # The site states another entity's organisation number and never ours: it is that entity's site (the manager's, the
+        # parent's or a sister company's), even when the registry declares it.
+        result.update(state="other_entity", reason=f"the site states organisation number {sorted(others)[0]} of another entity, and not {org}")
         return result
-    # No org number. Registry-declared sites are accepted: the registry itself ties the URL to the entity.
-    if source == "registry":
-        result.update(state="verified", proof="registry_declared_website", span=f"hjemmeside: {url}", proof_url=response.final_url)
+    first = next((t for t in tokens if t not in GENERIC_NAME_WORDS), "")
+    named = (site_names_company(ctx, tokens) or brand_is_ours(ctx, tokens)
+             or (len(first) >= 4 and (first in re.sub(r"[^a-z0-9]", "", ctx.host.split(".")[0]) or first in norm(page.title).split())))
+    head = norm(page.title + " " + page.meta.get("og:site_name", ""))
+    label = re.sub(r"[^a-z0-9]", "", norm(ctx.host.rsplit(".", 1)[0]))
+    joined = "".join(tokens)
+    branded = name_phrase_in(head, tokens) or (len(joined) >= 4 and len(label) >= 4 and joined == label) or brand_is_ours(ctx, tokens)
+    if proof and named:
+        # The organisation number alone could sit in a list of clients or managed associations: the site must also name the company.
+        result.update(state="verified", proof="org_number_on_site", span=proof, proof_url=proof_url, branded=branded)
         return result
-    text_norm = norm(page.title + " " + page.meta.get("og:site_name", "") + " " + page.text[:6000])
-    if name_matches(text_norm, tokens):
-        head = norm(page.title + " " + page.meta.get("og:site_name", ""))
-        label = re.sub(r"[^a-z0-9]", "", norm(ctx.host.rsplit(".", 1)[0]))
-        joined = "".join(tokens)
-        branded = name_matches(head, tokens) or (len(joined) >= 4 and (joined in label or label in joined) and len(label) >= 4)
-        corroboration = _corroborate(ctx, entity, source, branded)
-        if corroboration:
-            result.update(state="verified", proof="registry_contact_details_match", span=corroboration[0], proof_url=corroboration[1],
-                          branded=branded)
-            return result
-        result.update(state="ambiguous", reason="name matches but the organisation number is not shown on the site")
+    if source == "registry" and branded:
+        # Registry-declared and the site calls itself by the company's name. A declared site that does not (the housing
+        # manager's usbl.no / obos.no for a borettslag, a parent group's site) is not published: it is someone else's site.
+        result.update(state="verified", proof="registry_declared_website", span=f"hjemmeside: {url}; site title: {page.title[:120]}",
+                      proof_url=response.final_url, branded=True)
+        return result
+    address = _address_match(ctx, entity, tokens)
+    if address:
+        result.update(state="verified", proof="legal_name_and_address_match", span=address[0], proof_url=address[1], branded=branded)
+        return result
+    if named or proof:
+        result.update(state="ambiguous", reason="the site does not prove it is this entity's own site (organisation number with name, "
+                                                 "registry declaration with matching site name, or exact name with the registered address)")
     return result
 
 
@@ -358,30 +369,57 @@ def _digits(text: str) -> str:
     return re.sub(r"\D", "", text)
 
 
-def _corroborate(ctx: SiteContext, entity: dict | None, source: str, branded: bool = True) -> tuple[str, str] | None:
-    """Name matched; accept only with entity-specific registry details: phone, or street AND postcode (or e-mail domain)."""
+def name_phrase_in(text_norm: str, tokens: list[str]) -> bool:
+    """The company's name (legal name without the legal form) as one contiguous phrase, not words scattered over a page."""
+    if not tokens or len("".join(tokens)) < 4:
+        return False
+    return re.search(r"(?<![a-z0-9])" + re.escape(" ".join(tokens)) + r"(?![a-z0-9])", text_norm) is not None
+
+
+GENERIC_NAME_WORDS = {"borettslag", "sameie", "sameiet", "eiendom", "holding", "invest", "consulting", "gruppen", "group", "bygg", "service",
+                      "services", "norge", "norway", "norsk", "regnskap", "transport", "boligbyggelag", "forening", "stiftelse", "kommune"}
+
+
+def brand_is_ours(ctx: SiteContext, tokens: list[str]) -> bool:
+    """The site's own name (og:site_name, Organization name, a <title> segment) is a contiguous run of the legal name's words
+    that is not just a generic word: "KONGSBERG" for KONGSBERG GRUPPEN ASA, "Hydro" for Norsk Hydro ASA; not "OBOS" or
+    "Borettslag" for ABELLUND BORETTSLAG."""
+    home = ctx.home
+    names = [home.meta.get("og:site_name", "")] + [seg for seg in re.split(r"\s[|\-–—·:]\s", home.title)]
+    names += [str(i.get("name") or "") for i in home.jsonld if ld_types(i) & {"Organization", "Corporation", "LocalBusiness"}]
+    for raw in names:
+        cand = name_tokens(raw.strip()) if raw.strip() and not DOMAIN_LIKE.match(raw.strip()) else []
+        if not cand or len("".join(cand)) < 4 or all(t in GENERIC_NAME_WORDS for t in cand):
+            continue
+        k = len(cand)
+        if any(tokens[i:i + k] == cand for i in range(len(tokens) - k + 1)):
+            return True
+    return False
+
+
+def site_names_company(ctx: SiteContext, tokens: list[str]) -> bool:
+    return any(name_phrase_in(norm(p.title + " " + p.text), tokens) for p, _r in ctx.pages.values())
+
+
+def _address_match(ctx: SiteContext, entity: dict | None, tokens: list[str]) -> tuple[str, str] | None:
+    """The exact company name AND the registered Norwegian street address with postcode on the same page. Phone numbers,
+    e-mail domains and people's names are not accepted: they are shared by accountants, managers and namesakes."""
     if not entity:
         return None
-    for url, (page, _resp) in ctx.pages.items():
-        text = page.text
-        digits = _digits(text)
-        for key in ("telefon", "mobil"):
-            phone = _digits(str(entity.get(key) or ""))[-8:]
-            if len(phone) == 8 and phone in digits:
-                return f"registry {key} {entity[key]} shown on the site", url
-        addr = entity.get("forretningsadresse") or {}
+    addresses = []
+    for key in ("forretningsadresse", "postadresse"):
+        addr = entity.get(key) or {}
         street = (addr.get("adresse") or [""])[0] if isinstance(addr.get("adresse"), list) and addr.get("adresse") else ""
         post = str(addr.get("postnummer") or "")
-        tnorm = norm(text)
-        if street and post and len(norm(street)) >= 6 and norm(street) in tnorm and re.search(rf"(?<!\d){post}(?!\d)", text):
-            return f"registry address {street}, {post} shown on the site", url
-        for leader in ((entity.get("_leader_names") or []) if branded else []):
-            parts = norm(leader).split()
-            if len(parts) >= 2 and len(norm(leader)) >= 9 and norm(leader) in tnorm:
-                return f"registered leader {leader} named on the site", url
-        email = str(entity.get("epostadresse") or "")
-        if source == "registry_email_domain" and "@" in email:
-            return f"site domain equals registry e-mail domain ({email.rsplit('@', 1)[1]})", url
+        if street and post and len(norm(street)) >= 6 and re.search(r"\d", street) and (addr.get("landkode") or "NO") == "NO":
+            addresses.append((street, post))
+    for url, (page, _resp) in ctx.pages.items():
+        tnorm = norm(page.title + " " + page.text)
+        if not name_phrase_in(tnorm, tokens):
+            continue
+        for street, post in addresses:
+            if re.search(r"(?<![a-z0-9])" + re.escape(norm(street)) + r"(?![a-z0-9])", tnorm) and re.search(rf"(?<!\d){post}(?!\d)", page.text):
+                return f"name and registered address {street}, {post} shown on the site", url
     return None
 
 
@@ -411,13 +449,8 @@ def resolve_website(fetcher: Fetcher, case: Case, entity: dict | None, legal_nam
         domain = entity["epostadresse"].rsplit("@", 1)[1].strip().lower()
         if domain and domain not in FREE_MAIL and not ACCOUNTANT_HINT.search(domain.split(".")[0]):
             add("registry_email_domain", domain)
-    pre = len(candidates)
-    for domain in domain_candidates(legal_name)[:max_guesses]:
-        if registered_host(domain) in seen_hosts:
-            continue
-        if fetcher.host_is_public(domain) or fetcher.host_is_public("www." + domain):
-            add("name_guess", domain)
-    del pre
+    # No domain is ever guessed from the company name (max_guesses is ignored): a name-shaped domain is how a cafe in
+    # Illinois became the website of a Norwegian ISABELLA CAFE AS. Candidates come only from the registry and Wikidata (P2333).
 
     best_ambiguous: dict[str, Any] | None = None
     best_group: dict[str, Any] | None = None
@@ -437,7 +470,7 @@ def resolve_website(fetcher: Fetcher, case: Case, entity: dict | None, legal_nam
                 continue
             methods = {"org_number_on_site": "org_number_exact_match_in_page_text",
                        "registry_declared_website": "registry_declared_website",
-                       "registry_contact_details_match": "name_plus_registry_contact_details_match"}
+                       "legal_name_and_address_match": "exact_name_plus_registered_address_match"}
             ev_ids = [case.ev(result["proof_url"], "company_owned", response.retrieved_at,
                               (ctx.pages.get(result["proof_url"], (None, response))[1]).sha256,
                               result["span"], methods[result["proof"]], http_status=200)]
@@ -447,30 +480,30 @@ def resolve_website(fetcher: Fetcher, case: Case, entity: dict | None, legal_nam
                                       "brreg_enheter_json_field", license="NLOD 2.0"))
             value = {"url": ctx.origin, "candidate_source": source, "identity_proof": result["proof"],
                      "site_scope": "own", "scope_basis": scope["basis"]}
-            case.claim("official_website", value, "available", ev_ids, confidence={"org_number_on_site": 0.99, "registry_declared_website": 0.9}.get(result["proof"], 0.85),
+            case.claim("official_website", value, "available", ev_ids, confidence={"org_number_on_site": 0.99, "registry_declared_website": 0.95}.get(result["proof"], 0.95),
                        section="4")
             ctx.proof = result["proof"]  # type: ignore[attr-defined]
             return {"ctx": ctx, "source": source}
+        if result["state"] == "other_entity" and best_group is None:
+            best_group = {"reason": result["reason"]}
         if result["state"] == "blocked" and blocked is None:
             blocked = result
         if result["state"] == "ambiguous" and best_ambiguous is None:
             best_ambiguous = result
+    # Nothing verified. Nothing about any candidate site is published, not even its URL: when in doubt, leave it out.
     if best_group:
-        src, cls, sha, span, method = best_group["evidence"]
-        eid = case.ev(src, cls, best_group["retrieved_at"], sha, span, method, http_status=200 if cls == "company_owned" else None)
-        case.claim("official_website", {"candidate_url": best_group["origin"], "site_scope": "group_site", "owner": best_group["owner"],
-                                        "reason": best_group["reason"]}, "ambiguous", [eid], confidence=0.9, section="4",
-                   note=f"{best_group['origin']} is not this company's own site: {best_group['reason']}. "
-                        "Not published as its website; the site's social links, news and jobs are not used either")
+        case.claim("official_website", None, "ambiguous", [], section="4",
+                   note=f"A candidate site was found but it is not this company's own site ({best_group['reason']}); not published, "
+                        "and neither are its social links, news or jobs")
     elif best_ambiguous:
-        case.claim("official_website", None, "ambiguous", [],
-                   note=f"Candidate {best_ambiguous['url']} resembles the company name but does not show organisation number {org}; not published",
-                   section="4")
-    elif blocked and blocked["source"] != "name_guess":
-        case.claim("official_website", None, "blocked", [], note=f"Declared site {blocked['url']} could not be read: {blocked.get('reason')}", section="4")
+        case.claim("official_website", None, "ambiguous", [], section="4",
+                   note=f"A candidate site could not be proven to be this entity's own site (organisation number {org} with the name, "
+                        "a registry declaration with matching site name, or the exact name with the registered address); not published")
+    elif blocked:
+        case.claim("official_website", None, "blocked", [], note=f"The declared site could not be read ({blocked.get('reason')}); not published", section="4")
     else:
-        note = "No website declared in the registry; checked " + (", ".join(attempts) if attempts else "no resolvable name-derived domains")
-        case.claim("official_website", None, "not_available", [], note=note[:300], section="4")
+        case.claim("official_website", None, "not_available", [], section="4",
+                   note="No website is declared in the registry or Wikidata (by organisation number) that could be verified; no domain is guessed from the name")
     return None
 
 
@@ -500,6 +533,11 @@ def extract_brand(case: Case, ctx: SiteContext, legal_name: str) -> None:
         tokens = name_tokens(legal_name)
         pick = next((seg for seg in segments if name_matches(norm(seg), tokens)), segments[0] if segments else None)
         brand = pick[:80] if pick else None
+    if brand:
+        joined_legal = "".join(name_tokens(legal_name))
+        joined_brand = "".join(name_tokens(brand))
+        if not (len(joined_brand) >= 3 and (joined_brand in joined_legal or name_phrase_in(norm(brand), name_tokens(legal_name)))):
+            brand = None  # a brand that is not (part of) the legal name may be the manager's or the group's
     if brand:
         eid = case.ev(resp.final_url, "company_owned", resp.retrieved_at, resp.sha256, brand, method, http_status=200)
         same = norm(brand) == norm(legal_name) or norm(brand) == " ".join(name_tokens(legal_name))
@@ -539,6 +577,9 @@ FOREIGN_MARKERS = ("deutschland", "germany", "tyskland", "sverige", "sweden", "d
                    "group", "gruppen", "international", "holding", "konsern", "europe", "gmbh", "corporate")
 SHORT_FOREIGN_MARKERS = {"ab", "oy", "sa", "ag", "uk", "usa", "se", "dk", "de", "fi", "inc", "ltd", "aps", "bv"}
 NEUTRAL_REMAINDER = ("norge", "norway", "norsk", "norwegian", "official", "offisiell", "offisielle", "asa", "as", "nor", "no")
+# Housing-cooperative managers, property managers and parent organisations whose name may sit next to ours in a handle
+MANAGER_MARKERS = ("usbl", "obos", "bbl", "boligbyggelag", "forvaltning", "eiendom", "regnskap", "revisjon", "advokat", "konsern", "gruppen",
+                   "holding", "forening", "forbund", "kjede", "franchise")
 # Social links that belong to the web agency or the site theme, never to the company
 THIRD_PARTY_HANDLES = {"wordpress", "wix", "squarespace", "shopify", "webflow", "elementor", "themeforest", "envato", "facebook", "meta",
                        "instagram", "linkedin", "youtube", "twitter", "x", "tiktok", "google", "visma", "mailchimp", "hubspot"}
@@ -566,8 +607,13 @@ def social_mismatch(platform: str, clean: str, anchors: list[str], declared: set
     if anchor is None and clean.lower() not in declared:
         return "profile name does not carry the company name"
     rest = key.replace(anchor, "", 1) if anchor else key
+    if anchor and rest.strip("0123456789") and rest not in LEGAL_SUFFIXES | {"official", "offisiell", "no"}:
+        return f'profile name adds "{rest}" to the company name: it may belong to a sister, country or parent entity'
     for word in NEUTRAL_REMAINDER:
         rest = rest.replace(word, "") if len(word) > 3 else ("" if rest == word else rest)
+    manager = next((m for m in MANAGER_MARKERS if m in rest), None)
+    if manager:
+        return f'profile name carries "{manager}": it belongs to a manager, parent or related organisation'
     marker = next((m for m in FOREIGN_MARKERS if m in rest), None) or (rest if rest in SHORT_FOREIGN_MARKERS else None)
     if marker:
         return f'profile name carries "{marker}": it belongs to another entity, a country branch or the group'
@@ -594,7 +640,10 @@ def declared_profiles(ctx: SiteContext, legal_name: str) -> set[str]:
 def extract_social(case: Case, ctx: SiteContext, legal_name: str) -> None:
     """Social profiles linked from the footer of the company's confirmed own site (homepage), kept only when each one can be tied
     to this company. Header, body, legal-page and other-page links are not read. Says so when nothing is found."""
-    anchors = [a for a in {re.sub(r"[^a-z0-9]", "", ctx.host.split(".")[0]), "".join(name_tokens(legal_name))} if len(a) >= 4]
+    # The handle must carry the company's own name. The site's domain label is NOT an anchor: on a manager's or group's site it is
+    # the manager's name (usbl -> instagram.com/boligbyggelaget_usbl published for HOVLY BORETTSLAG).
+    joined_legal = "".join(name_tokens(legal_name))
+    anchors = [joined_legal] if len(joined_legal) >= 4 else []
     declared = declared_profiles(ctx, legal_name)
     found: dict[str, dict[str, list[tuple[str, str, Response]]]] = {}
     rejected: dict[str, str] = {}
@@ -603,8 +652,6 @@ def extract_social(case: Case, ctx: SiteContext, legal_name: str) -> None:
     seen_in_footer = 0
     for url in (home_url,):
         for link in page.links:
-            if not link.in_footer:
-                continue
             cls = classify_social(page.abs(link.href))
             if not cls:
                 continue
@@ -629,15 +676,13 @@ def extract_social(case: Case, ctx: SiteContext, legal_name: str) -> None:
         eid = case.ev(page_url, "company_owned", resp.retrieved_at, resp.sha256, f"link to {clean}", "outbound_link_from_verified_site", http_status=200)
         case.claim("company_profile", {"platform": platform, "url": clean, "linked_from": page_url}, "available", [eid],
                    key=platform, confidence=0.9, section="4",
-                   note="Linked from the footer of the company's own site; the handle carries the company name and no group, country or agency marker. The platform itself was not scraped")
+                   note="Linked from the company's own verified site; the handle carries the company's legal name and no group, manager, country or agency marker. The platform itself was not scraped")
     if not found:
         if rejected:
-            note = ("Footer social links were not published because they cannot be tied to this company: "
+            note = ("Social links on the site were not published because they cannot be tied to this company: "
                     + "; ".join(sorted(rejected.values())[:6]))
-        elif not page.has_footer:
-            note = f"The homepage of {ctx.origin} has no footer section, so no social links were read (only footer links are used)"
         else:
-            note = f"No social media links found in the footer of {ctx.origin}"
+            note = f"No social media links found on the homepage of {ctx.origin}"
         case.claim("company_profile", None, "not_available", [], key="any", section="4", note=note[:400])
 
 
@@ -777,7 +822,7 @@ def extract_jobs(fetcher: Fetcher, case: Case, ctx: SiteContext, legal_name: str
                     if (not on_site and host != final_host) or not ats_ad_like(absu):
                         continue  # on a platform page, only ads on that same platform host (not its "powered by" links)
                     job, foreign = None, False
-                    if opened < 8:
+                    if opened < 12:
                         opened += 1
                         ad = fetcher.get(absu, case.ops)
                         ad_page = _html_page(ad)
@@ -816,6 +861,8 @@ def extract_jobs(fetcher: Fetcher, case: Case, ctx: SiteContext, legal_name: str
                     absu = page.abs(link.href).split("#")[0]
                     if ats_host((urllib.parse.urlsplit(absu).hostname or "").lower()) and not ats_ad_like(absu) and absu not in visited                             and absu not in queue and len(queue) < 2:
                         queue.append(absu)
+        today = datetime.now(timezone.utc).date().isoformat()
+        jobs = [j for j in jobs if j.get("date_posted") and j.get("url") and (j.get("valid_through") or today) >= today]  # dated, open
         for job in jobs[:15]:
             span = job["title"] + (f" (datePosted {job['date_posted']})" if job["date_posted"] else "")
             src = job.get("_resp", resp)
@@ -932,8 +979,8 @@ def extract_activity(fetcher: Fetcher, case: Case, ctx: SiteContext, legal_name:
     def names_company(text: str) -> bool:
         words = norm(text)
         squashed = words.replace(" ", "")
-        return (name_matches(words, legal_tokens) or (bool(brand_tokens) and name_matches(words, brand_tokens))
-                or (len(label) >= 4 and label in squashed) or (len("".join(legal_tokens)) >= 5 and "".join(legal_tokens) in squashed))
+        return (name_phrase_in(words, legal_tokens) or (bool(brand_tokens) and name_phrase_in(words, brand_tokens))
+                or (len("".join(legal_tokens)) >= 5 and "".join(legal_tokens) in squashed))
 
     feeds: list[str] = []
     for _t, href, _title in ctx.home.alternates:

@@ -16,6 +16,24 @@ def find_org_numbers(text: str) -> set[str]:
     return {"".join(m.groups()) for m in ORG_RE.finditer(text)}
 
 
+LABELLED_ORG_RE = re.compile(r"(?:org(?:anisasjons)?[\s.\-]*(?:nr|nummer|no|number)\.?|foretaksregisteret|\bNO)[\s.:#]*"
+                             r"(\d{3})[ . ]?(\d{3})[ . ]?(\d{3})(?!\d)", re.I)
+
+
+def valid_org(org: str) -> bool:
+    """Modulus-11 check digit of a Norwegian organisation number."""
+    if not re.fullmatch(r"[89]\d{8}", org):
+        return False
+    rest = sum(int(d) * w for d, w in zip(org[:8], (3, 2, 7, 6, 5, 4, 3, 2))) % 11
+    check = 0 if rest == 0 else 11 - rest
+    return check != 10 and check == int(org[8])
+
+
+def labelled_org_numbers(text: str) -> set[str]:
+    """Organisation numbers the page states as such ("Org.nr. 976 967 631", "NO 976967631 MVA"), check digit valid."""
+    return {o for o in ("".join(m.groups()) for m in LABELLED_ORG_RE.finditer(text)) if valid_org(o)}
+
+
 @dataclass
 class Link:
     href: str
@@ -62,6 +80,8 @@ class _Extractor(HTMLParser):
         self._i = 0
         self._footer_tag = ""
         self._footer_depth = 0
+        self._svg = 0
+        self._title_done = False
 
     def handle_starttag(self, tag, attrs):
         self._i += 1
@@ -73,8 +93,11 @@ class _Extractor(HTMLParser):
                                      or FOOTER_RE.search(a.get("id", "") + " " + a.get("class", ""))):
             self._footer_tag, self._footer_depth = tag, 1
             self.page.has_footer = True
+        if tag == "svg":
+            self._svg += 1
         if tag == "title":
-            self._in_title = True
+            # only the document's own <title>: an <svg><title> icon label later in the body is not the page title
+            self._in_title = not self._svg and not self._title_done
         elif tag == "meta":
             key = (a.get("property") or a.get("name") or a.get("itemprop") or "").lower()
             if key and "content" in a and key not in self.page.meta:
@@ -105,7 +128,11 @@ class _Extractor(HTMLParser):
     def handle_endtag(self, tag):
         if self._footer_depth and tag == self._footer_tag:
             self._footer_depth -= 1
+        if tag == "svg" and self._svg:
+            self._svg -= 1
         if tag == "title":
+            if self._in_title:
+                self._title_done = True
             self._in_title = False
             self._text.append(chr(10))  # the title is its own line, never glued to the first text of the body
         elif tag == "a":

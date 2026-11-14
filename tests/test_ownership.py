@@ -91,9 +91,8 @@ def test_registry_declared_site_that_belongs_to_the_group_is_not_published():
     _f, case, found = _acme("<p>Acme</p><footer>© 2026 Acme AS</footer>")
     assert found is None
     claim = claims(case, "official_website", "ambiguous")[0]
-    assert claim["value"]["site_scope"] == "group_site" and claim["value"]["owner"] == "Acme AS"
-    assert claim["evidence_ids"] and not claims(case, "official_website")
-    assert "not this company's own site" in claim["note"]
+    assert claim["value"] is None and not claims(case, "official_website")  # not even the other entity's URL is published
+    assert "not this company's own site" in claim["note"] and "Acme AS" in claim["note"] and "acme.example" not in claim["note"]
 
 
 def test_site_with_own_org_number_and_no_other_owner_is_published_as_own():
@@ -112,8 +111,8 @@ def test_brand_owned_by_another_registered_entity_is_a_group_site():
     case = case_named("ACME NORGE AS")
     entity = {"epostadresse": "post@acme.example", "forretningsadresse": {"adresse": ["Storgata 1"], "postnummer": "0155"}}
     assert resolve_website(fetcher, case, entity, "ACME NORGE AS", None, max_guesses=0) is None
-    value = claims(case, "official_website", "ambiguous")[0]["value"]
-    assert value["site_scope"] == "group_site" and "999888777" in value["owner"]
+    claim = claims(case, "official_website", "ambiguous")[0]
+    assert claim["value"] is None and "not this company's own site" in claim["note"]
 
 
 def test_group_site_yields_no_social_news_or_jobs_for_the_company():
@@ -128,7 +127,7 @@ def test_group_site_yields_no_social_news_or_jobs_for_the_company():
     assert not claims(case, "company_profile") and not claims(case, "job_posting") and not claims(case, "public_activity")
     assert "https://acme.example/feed/" not in fetcher.asked and "https://acme.example/karriere" not in fetcher.asked
     text = " ".join(summarize(case)["unknowns"])
-    assert "not this company's own site" in text and "https://acme.example/" in text
+    assert "no official website could be verified" in text and "https://acme.example/" not in text
 
 
 # ----- 2. social links ------------------------------------------------------------------------------------
@@ -162,7 +161,7 @@ def test_all_links_rejected_leaves_the_field_empty_and_says_why():
     extract_social(case, ctx, "FJORD BYGG AS")
     assert not claims(case, "company_profile")
     note = claims(case, "company_profile", "not_available")[0]["note"]
-    assert "fjordbygg_deutschland" in note and "deutschland" in note and note.startswith("Footer social links were not published")
+    assert "fjordbygg_deutschland" in note and "deutschland" in note and note.startswith("Social links on the site were not published")
 
 
 def test_site_declared_profile_is_accepted_even_without_the_name_in_the_handle():
@@ -301,7 +300,8 @@ def test_linked_ad_page_with_jobposting_json_ld_is_a_posting():
 def test_ats_hosted_ad_links_count_but_the_ats_root_does_not():
     links = ('<a href="https://fjordbygg.webcruiter.no/">Se alle våre stillinger</a>'
              '<a href="https://fjordbygg.webcruiter.no/Main/Recruit/Public/4711">Prosjektleder bygg</a>')
-    case, _r, _f = _jobs({}, links)
+    ad = html("Prosjektleder", '<time itemprop="datePosted" datetime="2026-09-20">20. sept</time>')
+    case, _r, _f = _jobs({"https://fjordbygg.webcruiter.no/Main/Recruit/Public/4711": ad}, links)
     assert [c["value"]["title"] for c in claims(case, "job_posting")] == ["Prosjektleder bygg"]
 
 
@@ -359,24 +359,21 @@ def _social(page_body):
     return case
 
 
-def test_social_links_are_read_only_from_the_footer():
+def test_social_links_anywhere_on_the_verified_homepage_count_when_the_handle_is_the_company_name():
     case = _social(f'<header><a href="{IG}">ig</a></header><main><a href="{FB}">fb</a></main>'
                    '<footer><a href="https://www.linkedin.com/company/fjordbygg">in</a></footer>')
-    assert [c["value"]["url"] for c in claims(case, "company_profile")] == ["https://www.linkedin.com/company/fjordbygg"]
+    assert sorted(c["value"]["platform"] for c in claims(case, "company_profile")) == ["facebook", "instagram", "linkedin"]
 
 
-def test_footer_is_recognised_by_tag_role_or_class_and_nesting_ends_at_its_close():
-    for opener, closer in (("<footer>", "</footer>"), ('<div role="contentinfo">', "</div>"), ('<div class="site-footer"><div class="x">', "</div></div>"),
-                           ('<section id="page_footer">', "</section>")):
-        case = _social(f'{opener}<a href="{FB}">fb</a>{closer}<p><a href="{IG}">ig</a></p>')
-        assert [c["value"]["platform"] for c in claims(case, "company_profile")] == ["facebook"], opener  # the link after the footer is out
+def test_manager_or_sister_handles_are_rejected_even_on_the_verified_site():
+    case = _social('<a href="https://instagram.com/boligbyggelaget_usbl">i</a><a href="https://www.facebook.com/fjordbyggnorge">f</a>'
+                   '<a href="https://www.linkedin.com/company/usbl">l</a>')
+    assert not claims(case, "company_profile")
 
 
-def test_nothing_found_says_which_case_applies():
-    none_in_footer = claims(_social(f'<main><a href="{FB}">fb</a></main><footer><p>Org.nr 914 778 271</p></footer>'), "company_profile", "not_available")
-    assert len(none_in_footer) == 1 and none_in_footer[0]["note"].startswith("No social media links found in the footer of https://fjordbygg.example/")
-    no_footer = claims(_social(f'<main><a href="{FB}">fb</a></main>'), "company_profile", "not_available")
-    assert "has no footer section" in no_footer[0]["note"]
+def test_nothing_found_says_so():
+    none = claims(_social('<footer><p>Org.nr 914 778 271</p></footer>'), "company_profile", "not_available")
+    assert len(none) == 1 and none[0]["note"].startswith("No social media links found on the homepage of https://fjordbygg.example/")
 
 
 def test_wikidata_profiles_are_not_a_social_source():
@@ -417,12 +414,12 @@ def test_careers_page_on_a_job_platform_linked_from_the_site_is_followed():
     assert claims(case, "hiring_status")[0]["value"]["postings_found"] == 2
 
 
-def test_platform_ad_without_date_is_kept_with_title_and_link_only():
+def test_platform_ad_without_date_is_not_published():
     home = html("Fjord Bygg", '<p>Org.nr 914 778 271</p><a href="https://fjordbygg.webcruiter.no/">Karriere</a>')
     listing = html("Ledige stillinger", '<a href="/Main/Recruit/Public/4711">Prosjektleder bygg</a><a href="/Main/Recruit/Public/4712">Bilmekaniker</a>')
     case, _ = _phase({"https://fjordbygg.example/": home, "https://fjordbygg.webcruiter.no/": listing})
     got = sorted((c["value"]["title"], c["value"]["date_posted"]) for c in claims(case, "job_posting"))
-    assert got == [("Bilmekaniker", None), ("Prosjektleder bygg", None)]
+    assert got == []  # undated: not a verified open posting
 
 
 def test_platform_ads_of_another_employer_are_not_published():
@@ -435,7 +432,7 @@ def test_platform_ads_of_another_employer_are_not_published():
 
 def test_own_careers_page_is_used_and_an_empty_one_is_reported_as_checked():
     home = html("Fjord Bygg", '<p>Org.nr 914 778 271</p><a href="/karriere">Karriere</a>')
-    ld = '<script type="application/ld+json">{"@type":"JobPosting","title":"Tømrer","hiringOrganization":{"name":"Fjord Bygg AS"}}</script>'
+    ld = '<script type="application/ld+json">{"@type":"JobPosting","title":"Tømrer","datePosted":"2026-10-01","hiringOrganization":{"name":"Fjord Bygg AS"}}</script>'
     case, _ = _phase({"https://fjordbygg.example/": home, "https://fjordbygg.example/karriere": html("Karriere", ld)})
     assert [c["value"]["title"] for c in claims(case, "job_posting")] == ["Tømrer"]
     empty, _ = _phase({"https://fjordbygg.example/": home, "https://fjordbygg.example/karriere": html("Karriere", "<p>Ingen ledige stillinger</p>")})
@@ -455,8 +452,9 @@ def test_own_careers_page_that_only_points_to_a_job_platform_is_followed_one_hop
     home = html("Fjord Bygg", '<p>Org.nr 914 778 271</p><a href="/karriere">Karriere</a>')
     careers = html("Karriere", '<a href="https://fjordbygg.jobylon.com/jobs">See our open positions</a>')
     listing = html("Jobs", '<a href="/jobs/77-tomrer">Tømrer til Bergen</a>')
+    ad = html("Tømrer", '<time itemprop="datePosted" datetime="2026-10-02">2. okt</time>')
     case, fetcher = _phase({"https://fjordbygg.example/": home, "https://fjordbygg.example/karriere": careers,
-                            "https://fjordbygg.jobylon.com/jobs": listing})
+                            "https://fjordbygg.jobylon.com/jobs": listing, "https://fjordbygg.jobylon.com/jobs/77-tomrer": ad})
     assert [c["value"]["title"] for c in claims(case, "job_posting")] == ["Tømrer til Bergen"]
     # a platform page that shows no postings in plain HTML is reported as checked, naming both pages
     case2, _ = _phase({"https://fjordbygg.example/": home, "https://fjordbygg.example/karriere": careers,
