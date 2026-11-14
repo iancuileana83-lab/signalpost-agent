@@ -87,12 +87,21 @@ def _acme(page_body, *, routes=None, entity=None, name="ACME NORGE AS"):
     return fetcher, case, found
 
 
-def test_registry_declared_site_that_belongs_to_the_group_is_not_published():
+def test_registry_declared_group_site_is_kept_but_marked_shared():
     _f, case, found = _acme("<p>Acme</p><footer>© 2026 Acme AS</footer>")
-    assert found is None
-    claim = claims(case, "official_website", "ambiguous")[0]
-    assert claim["value"] is None and not claims(case, "official_website")  # not even the other entity's URL is published
-    assert "not this company's own site" in claim["note"] and "Acme AS" in claim["note"] and "acme.example" not in claim["note"]
+    assert found["shared"] is True
+    value = claims(case, "official_website")[0]["value"]
+    assert value["url"] == "https://acme.example/" and value["site_scope"] == "registry_declared_shared"
+    assert "Acme AS" in value["scope_basis"]
+
+
+def test_group_site_found_without_registry_declaration_is_not_published():
+    home = html("Acme", "<p>Acme Norge AS, Storgata 1, 0155 Oslo</p><footer>© 2026 Acme AS</footer>")
+    fetcher = SiteFake({"https://acme.example/": home})
+    case = case_named("ACME NORGE AS")
+    entity = {"epostadresse": "post@acme.example", "forretningsadresse": {"adresse": ["Storgata 1"], "postnummer": "0155"}}
+    assert resolve_website(fetcher, case, entity, "ACME NORGE AS", None, max_guesses=0) is None
+    assert not claims(case, "official_website")
 
 
 def test_site_with_own_org_number_and_no_other_owner_is_published_as_own():
@@ -115,7 +124,7 @@ def test_brand_owned_by_another_registered_entity_is_a_group_site():
     assert claim["value"] is None and "not this company's own site" in claim["note"]
 
 
-def test_group_site_yields_no_social_news_or_jobs_for_the_company():
+def test_registry_group_site_yields_no_brand_social_news_or_jobs_that_do_not_name_the_company():
     feed = ('<?xml version="1.0"?><rss><channel>' + "".join(
         f"<item><title>Acme wins contract number {i}</title><link>https://acme.example/news/post-{i}/</link>"
         f"<pubDate>Mon, 0{i} Sep 2024 10:00:00 +0200</pubDate></item>" for i in (1, 2, 3)) + "</channel></rss>")
@@ -124,10 +133,9 @@ def test_group_site_yields_no_social_news_or_jobs_for_the_company():
                         "https://acme.example/feed/": feed})
     case = case_named("ACME NORGE AS")
     web_phase(fetcher, case, {"hjemmeside": "acme.example"}, None, max_guesses=0)
+    assert claims(case, "official_website")[0]["value"]["site_scope"] == "registry_declared_shared"
     assert not claims(case, "company_profile") and not claims(case, "job_posting") and not claims(case, "public_activity")
-    assert "https://acme.example/feed/" not in fetcher.asked and "https://acme.example/karriere" not in fetcher.asked
-    text = " ".join(summarize(case)["unknowns"])
-    assert "no official website could be verified" in text and "https://acme.example/" not in text
+    assert not claims(case, "public_brand") and not claims(case, "company_description")
 
 
 # ----- 2. social links ------------------------------------------------------------------------------------
@@ -628,21 +636,22 @@ def test_comparison_panel_header_is_pinned_and_only_the_table_scrolls_sideways(t
 
 
 # ----- 7. revision 4: when in doubt, leave it out ---------------------------------------------------------------
-def test_registry_site_branded_with_the_parent_group_name_is_not_published():
+def test_registry_site_branded_with_the_parent_group_name_is_kept_as_shared_without_brand():
     # ORKLA HOME & PERSONAL CARE AS declares orkla.com; the site calls itself "Orkla", the exact name of ORKLA ASA.
     search = json.dumps({"_embedded": {"enheter": [{"organisasjonsnummer": "910747711", "navn": "ORKLA ASA"}]}})
     fetcher = SiteFake({"https://orkla.example/": html("Orkla", "<p>Orkla</p>", '<meta property="og:site_name" content="Orkla">'),
                         "https://data.brreg.no/enhetsregisteret/api/enheter?navn=orkla&size=20": search})
     case = case_named("ORKLA HOME & PERSONAL CARE AS")
     web_phase(fetcher, case, {"hjemmeside": "orkla.example"}, None, max_guesses=0)
-    assert not claims(case, "official_website") and not claims(case, "registry_declared_website") and not claims(case, "public_brand")
+    assert claims(case, "official_website")[0]["value"]["site_scope"] == "registry_declared_shared"
+    assert not claims(case, "public_brand")  # "Orkla" is the parent's brand
 
 
-def test_registry_sub_page_of_a_shared_site_is_not_the_company_homepage():
+def test_registry_sub_page_of_a_shared_site_is_kept_as_shared():
     fetcher = SiteFake({"https://acme.example/": html("Acme Norge", "<p>Acme Norge</p>")})
     case = case_named("ACME NORGE AS")
     web_phase(fetcher, case, {"hjemmeside": "acme.example/home-care/"}, None, max_guesses=0)
-    assert not claims(case, "official_website")
+    assert claims(case, "official_website")[0]["value"]["site_scope"] == "registry_declared_shared"
     # ... unless the site shows our organisation number
     fetcher = SiteFake({"https://acme.example/": html("Acme Norge", f"<p>Acme Norge AS org.nr {ORG}</p>")})
     case = case_named("ACME NORGE AS")
@@ -654,7 +663,10 @@ def test_site_stating_another_entitys_org_number_is_not_used():
     fetcher = SiteFake({"https://acme.example/": html("Acme Norge", "<footer>Acme Norge – Org.nr. 976 967 631</footer>")})
     case = case_named("ACME NORGE AS")
     web_phase(fetcher, case, {"hjemmeside": "acme.example"}, None, max_guesses=0)
-    assert not claims(case, "official_website") and not claims(case, "registry_declared_website")
+    assert claims(case, "official_website")[0]["value"]["site_scope"] == "registry_declared_shared"  # declared: kept, read strictly
+    case2 = case_named("ACME NORGE AS")
+    web_phase(fetcher, case2, {"epostadresse": "post@acme.example"}, None, max_guesses=0)
+    assert not claims(case2, "official_website")  # found by the agent itself: another entity's site is not used
 
 
 def test_registry_extras_and_forced_liquidation_status():

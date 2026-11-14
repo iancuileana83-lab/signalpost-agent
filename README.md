@@ -62,20 +62,21 @@ per-company web budget (60 s).
 
 Precision rule (revision 4): **when in doubt, leave it out.** No domain is ever guessed from the company name;
 candidate sites come only from the registry (`hjemmeside`, e-mail domain) and Wikidata items matched by org number.
-A website is published only when:
+**A homepage declared in Brønnøysund (`hjemmeside`) for this exact organisation number is always published** when it
+can be reached, also when it is a group, manager or shared site. If the site does not itself prove it is the company's own
+(see the checks below), it is published with `site_scope: registry_declared_shared` and read strictly: no brand or
+description (they describe the site owner, e.g. OBOS or Orkla), social profiles only when the handle is the exact legal
+name, news only when it names the full legal name, and job postings only when the posting names this exact company as
+the employer.
+
+A site the agent found itself (registry e-mail domain, Wikidata by org number) is published only when:
 
 - the site shows our 9-digit organisation number **and** names the company, or
-- the registry declares it **and** the site calls itself by the company's name (a non-generic, contiguous part of
-  the legal name: "KONGSBERG" for KONGSBERG GRUPPEN ASA). A declared site that does not, such as the housing
-  manager's `usbl.no` / `obos.no` / `vestbo.no` for a borettslag or `privatmegleren.no` for a holding company, is withheld,
-  and so is the registry's `hjemmeside` value itself; or
-- the site shows the exact company name **and** the registered Norwegian street address with postcode on the same page.
+- the site shows the exact company name **and** the registered Norwegian street address with postcode on the same page,
 
-A site that states another entity's organisation number and never ours is that entity's site and is not used.
-A site whose brand is only part of our legal name while another registered entity carries exactly that name
-(`orkla.com` for ORKLA HOME & PERSONAL CARE AS is ORKLA ASA's) is a group site, also when the registry declares it;
-and a registry `hjemmeside` that is a sub-page of a shared domain (`orkla.no/home-personal-care/`) is accepted only
-when the site shows our organisation number. Registry facts added from the same record (by org number): postal
+and none of the group-site checks fires: the site states another entity's organisation number and never ours; it names
+another legal entity as its owner; or its brand is only part of our legal name while another registered entity carries
+exactly that name. Registry facts added from the same record (by org number): postal
 address, registered activity/purpose, former names, share capital, institutional sector, register memberships
 (VAT, business register ...) and articles date; phone and e-mail are deliberately not published.
 Phone numbers, e-mail domains and people's names no longer prove anything. Withheld candidates are never published,

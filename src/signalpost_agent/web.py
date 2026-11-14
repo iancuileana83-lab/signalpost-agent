@@ -423,6 +423,25 @@ def _address_match(ctx: SiteContext, entity: dict | None, tokens: list[str]) -> 
     return None
 
 
+def _publish_registry_shared(case: Case, entity: dict | None, ctx: "SiteContext", response: Response, org: str, reason: str) -> dict[str, Any]:
+    """A homepage the registry declares for this organisation number is always published, also when it is a group, manager or
+    shared site (hydro.com, orkla.com, usbl.no). Such a site is read strictly: no brand or description (they describe the site
+    owner), social profiles only with the exact legal name as handle, news only naming the full legal name, jobs only when the
+    posting names this exact company as the employer."""
+    ev_ids = [case.ev(f"https://data.brreg.no/enhetsregisteret/api/enheter/{org}", "official_registry", response.retrieved_at, None,
+                      f"hjemmeside: {(entity or {}).get('hjemmeside')}", "brreg_enheter_json_field", license="NLOD 2.0"),
+              case.ev(response.final_url, "company_owned", response.retrieved_at, response.sha256, ctx.home.title[:200],
+                      "registry_declared_website_reachable", http_status=200)]
+    case.claim("official_website", {"url": ctx.origin, "candidate_source": "registry", "identity_proof": "registry_declared_website",
+                                    "site_scope": "registry_declared_shared", "scope_basis": f"declared in the registry for {org}; {reason}"},
+               "available", ev_ids, confidence=0.9, section="4",
+               note="Declared in Enhetsregisteret for this organisation number. The site may belong to a group or manager, so only "
+                    "facts that name this exact company are read from it")
+    ctx.proof = "registry_declared_website"  # type: ignore[attr-defined]
+    ctx.shared = True  # type: ignore[attr-defined]
+    return {"ctx": ctx, "source": "registry", "shared": True}
+
+
 def resolve_website(fetcher: Fetcher, case: Case, entity: dict | None, legal_name: str, wikidata: dict | None,
                     max_guesses: int = 7) -> dict[str, Any] | None:
     """Find and verify the official website; emits the official_website claim; returns context or None."""
@@ -473,6 +492,8 @@ def resolve_website(fetcher: Fetcher, case: Case, entity: dict | None, legal_nam
                 # shared with a group or service provider, so its homepage, profiles, news and jobs are not this company's.
                 scope = {"scope": "group", "owner": None,
                          "reason": f"the registry declares a sub-page (/{declared_path}) of a shared site, and the site does not show organisation number {org}"}
+            if scope["scope"] == "group" and source == "registry":
+                return _publish_registry_shared(case, entity, ctx, response, org, scope["reason"])
             if scope["scope"] == "group":
                 attempts[-1] += ":group_site"
                 if best_group is None:
@@ -494,6 +515,10 @@ def resolve_website(fetcher: Fetcher, case: Case, entity: dict | None, legal_nam
                        section="4")
             ctx.proof = result["proof"]  # type: ignore[attr-defined]
             return {"ctx": ctx, "source": source}
+        if source == "registry" and result.get("ctx") is not None and result["state"] in ("ambiguous", "other_entity", "none"):
+            # Declared in Brønnøysund for this exact organisation number: always published, read strictly (see below).
+            return _publish_registry_shared(case, entity, result["ctx"], result["response"], org,
+                                            result.get("reason") or "the site does not itself name the company")
         if result["state"] == "other_entity" and best_group is None:
             best_group = {"reason": result["reason"]}
         if result["state"] == "blocked" and blocked is None:
@@ -654,7 +679,7 @@ def extract_social(case: Case, ctx: SiteContext, legal_name: str) -> None:
     # the manager's name (usbl -> instagram.com/boligbyggelaget_usbl published for HOVLY BORETTSLAG).
     joined_legal = "".join(name_tokens(legal_name))
     anchors = [joined_legal] if len(joined_legal) >= 4 else []
-    declared = declared_profiles(ctx, legal_name)
+    declared = set() if getattr(ctx, "shared", False) else declared_profiles(ctx, legal_name)
     found: dict[str, dict[str, list[tuple[str, str, Response]]]] = {}
     rejected: dict[str, str] = {}
     home_url = ctx.home_resp.final_url
@@ -790,8 +815,12 @@ def extract_jobs(fetcher: Fetcher, case: Case, ctx: SiteContext, legal_name: str
         candidates = [urllib.parse.urljoin(ctx.origin, p) for p in ("karriere", "ledige-stillinger", "jobb", "careers")]
     tokens = name_tokens(legal_name)
 
+    shared = getattr(ctx, "shared", False)
+
     def org_ok(job: dict) -> bool:
         org_name = job.get("hiring_organization")
+        if shared:  # group / manager site: the posting itself must name this exact company as the employer
+            return bool(org_name) and [t for t in name_tokens(org_name) if not t.isdigit()] == tokens
         return not (org_name and not name_matches(norm(org_name), tokens) and norm(org_name) not in norm(legal_name))
 
     queue, visited, checked_pages = candidates[:4], set(), []
@@ -872,7 +901,8 @@ def extract_jobs(fetcher: Fetcher, case: Case, ctx: SiteContext, legal_name: str
                     if ats_host((urllib.parse.urlsplit(absu).hostname or "").lower()) and not ats_ad_like(absu) and absu not in visited                             and absu not in queue and len(queue) < 2:
                         queue.append(absu)
         today = datetime.now(timezone.utc).date().isoformat()
-        jobs = [j for j in jobs if j.get("date_posted") and j.get("url") and (j.get("valid_through") or today) >= today]  # dated, open
+        jobs = [j for j in jobs if j.get("date_posted") and j.get("url") and (j.get("valid_through") or today) >= today  # dated, open
+                and (not shared or org_ok(j))]  # on a group/manager site the posting must name this exact employer
         for job in jobs[:15]:
             span = job["title"] + (f" (datePosted {job['date_posted']})" if job["date_posted"] else "")
             src = job.get("_resp", resp)
@@ -986,8 +1016,12 @@ def extract_activity(fetcher: Fetcher, case: Case, ctx: SiteContext, legal_name:
         """The page's own text: lines that also sit on the homepage (menu, footer, <title> suffix) are site chrome, not the article."""
         return " ".join(line for line in page.text.split("\n") if line.strip() and line.strip() not in chrome and line.strip() != page.title)[:20000]
 
+    shared = getattr(ctx, "shared", False)
+
     def names_company(text: str) -> bool:
         words = norm(text)
+        if shared:  # group / manager site: only posts that name this exact company by its full legal name
+            return name_phrase_in(words, legal_tokens) and len(legal_tokens) >= 2 or (len(legal_tokens) == 1 and norm(legal_name) in words)
         squashed = words.replace(" ", "")
         return (name_phrase_in(words, legal_tokens) or (bool(brand_tokens) and name_phrase_in(words, brand_tokens))
                 or (len("".join(legal_tokens)) >= 5 and "".join(legal_tokens) in squashed))
