@@ -62,12 +62,15 @@ per-company web budget (60 s).
 
 Precision rule (revision 4): **when in doubt, leave it out.** No domain is ever guessed from the company name;
 candidate sites come only from the registry (`hjemmeside`, e-mail domain) and Wikidata items matched by org number.
-**A homepage declared in Brønnøysund (`hjemmeside`) for this exact organisation number is always published** when it
-can be reached, also when it is a group, manager or shared site. If the site does not itself prove it is the company's own
-(see the checks below), it is published with `site_scope: registry_declared_shared` and read strictly: no brand or
-description (they describe the site owner, e.g. OBOS or Orkla), social profiles only when the handle is the exact legal
-name, news only when it names the full legal name, and job postings only when the posting names this exact company as
-the employer.
+**A homepage declared in Brønnøysund (`hjemmeside`) is published only when the site clearly belongs to the company
+itself**: it shows our organisation number, or its own name is the company's name or a non-generic part of it
+(Norsk Hydro → hydro.com, VEND MARKETPLACES → vend.com, HYPE MACHINE → hype.no). If the site's short brand is exactly the
+name of another registered entity tied to us (same business address, or it declares the same domain), it is that
+entity's site (ORKLA HOME & PERSONAL CARE AS → orkla.com is ORKLA ASA's), unless the site shows our own registered
+street address. A sub-page of a shared domain needs our organisation number on the site. Manager, housing-association
+manager, parent-group and other-brand sites (usbl.no, obos.no, vestbo.no, labo.no, oxer.no, ragde.no, obf.no,
+orkla.com, privatmegleren.no, industrifinans.no) are withheld completely, including the registry's `hjemmeside`
+value, and no brand, description, social links, news or jobs are taken from them.
 
 A site the agent found itself (registry e-mail domain, Wikidata by org number) is published only when:
 
