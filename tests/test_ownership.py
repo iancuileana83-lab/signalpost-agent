@@ -87,12 +87,10 @@ def _acme(page_body, *, routes=None, entity=None, name="ACME NORGE AS"):
     return fetcher, case, found
 
 
-def test_registry_declared_group_site_is_kept_but_marked_shared():
+def test_registry_declared_group_site_is_withheld_completely():
     _f, case, found = _acme("<p>Acme</p><footer>© 2026 Acme AS</footer>")
-    assert found["shared"] is True
-    value = claims(case, "official_website")[0]["value"]
-    assert value["url"] == "https://acme.example/" and value["site_scope"] == "registry_declared_shared"
-    assert "Acme AS" in value["scope_basis"]
+    assert found is None and not claims(case, "official_website")
+    assert "Acme AS" in claims(case, "official_website", "ambiguous")[0]["note"]
 
 
 def test_group_site_found_without_registry_declaration_is_not_published():
@@ -124,7 +122,7 @@ def test_brand_owned_by_another_registered_entity_is_a_group_site():
     assert claim["value"] is None and "not this company's own site" in claim["note"]
 
 
-def test_registry_group_site_yields_no_brand_social_news_or_jobs_that_do_not_name_the_company():
+def test_registry_group_site_yields_no_website_brand_social_news_or_jobs():
     feed = ('<?xml version="1.0"?><rss><channel>' + "".join(
         f"<item><title>Acme wins contract number {i}</title><link>https://acme.example/news/post-{i}/</link>"
         f"<pubDate>Mon, 0{i} Sep 2024 10:00:00 +0200</pubDate></item>" for i in (1, 2, 3)) + "</channel></rss>")
@@ -133,9 +131,10 @@ def test_registry_group_site_yields_no_brand_social_news_or_jobs_that_do_not_nam
                         "https://acme.example/feed/": feed})
     case = case_named("ACME NORGE AS")
     web_phase(fetcher, case, {"hjemmeside": "acme.example"}, None, max_guesses=0)
-    assert claims(case, "official_website")[0]["value"]["site_scope"] == "registry_declared_shared"
+    assert not claims(case, "official_website") and not claims(case, "registry_declared_website")
     assert not claims(case, "company_profile") and not claims(case, "job_posting") and not claims(case, "public_activity")
     assert not claims(case, "public_brand") and not claims(case, "company_description")
+    assert "https://acme.example/feed/" not in fetcher.asked and "https://acme.example/karriere" not in fetcher.asked
 
 
 # ----- 2. social links ------------------------------------------------------------------------------------
@@ -636,22 +635,36 @@ def test_comparison_panel_header_is_pinned_and_only_the_table_scrolls_sideways(t
 
 
 # ----- 7. revision 4: when in doubt, leave it out ---------------------------------------------------------------
-def test_registry_site_branded_with_the_parent_group_name_is_kept_as_shared_without_brand():
-    # ORKLA HOME & PERSONAL CARE AS declares orkla.com; the site calls itself "Orkla", the exact name of ORKLA ASA.
-    search = json.dumps({"_embedded": {"enheter": [{"organisasjonsnummer": "910747711", "navn": "ORKLA ASA"}]}})
+def test_registry_site_branded_with_the_parent_group_name_is_withheld():
+    # ORKLA HOME & PERSONAL CARE AS declares orkla.com; the site calls itself "Orkla", the exact name of ORKLA ASA,
+    # which is registered at the same business address.
+    addr = {"adresse": ["Drammensveien 149A"], "postnummer": "0277", "poststed": "OSLO", "land": "Norge"}
+    search = json.dumps({"_embedded": {"enheter": [{"organisasjonsnummer": "910747711", "navn": "ORKLA ASA", "forretningsadresse": addr}]}})
     fetcher = SiteFake({"https://orkla.example/": html("Orkla", "<p>Orkla</p>", '<meta property="og:site_name" content="Orkla">'),
                         "https://data.brreg.no/enhetsregisteret/api/enheter?navn=orkla&size=20": search})
     case = case_named("ORKLA HOME & PERSONAL CARE AS")
+    case.claim("registered_address", "Drammensveien 149A, 0277 OSLO, Norge", "available", [], section="1")
     web_phase(fetcher, case, {"hjemmeside": "orkla.example"}, None, max_guesses=0)
-    assert claims(case, "official_website")[0]["value"]["site_scope"] == "registry_declared_shared"
-    assert not claims(case, "public_brand")  # "Orkla" is the parent's brand
+    assert not claims(case, "official_website") and not claims(case, "registry_declared_website") and not claims(case, "public_brand")
 
 
-def test_registry_sub_page_of_a_shared_site_is_kept_as_shared():
+def test_registry_site_with_short_brand_is_kept_when_the_namesake_is_unrelated():
+    # Norsk Hydro ASA declares hydro.com, branded "Hydro"; an unrelated HYDRO AS elsewhere does not make it a group site.
+    other = {"adresse": ["Fjordveien 9"], "postnummer": "5000", "poststed": "BERGEN", "land": "Norge"}
+    search = json.dumps({"_embedded": {"enheter": [{"organisasjonsnummer": "999888777", "navn": "HYDRO AS", "forretningsadresse": other}]}})
+    fetcher = SiteFake({"https://hydro.example/": html("Hydro", "<p>Hydro</p>", '<meta property="og:site_name" content="Hydro">'),
+                        "https://data.brreg.no/enhetsregisteret/api/enheter?navn=hydro&size=20": search})
+    case = case_named("NORSK HYDRO ASA")
+    case.claim("registered_address", "Drammensveien 260, 0283 OSLO, Norge", "available", [], section="1")
+    web_phase(fetcher, case, {"hjemmeside": "hydro.example"}, None, max_guesses=0)
+    assert claims(case, "official_website")[0]["value"]["url"] == "https://hydro.example/"
+
+
+def test_registry_sub_page_of_a_shared_site_is_withheld_unless_the_org_number_is_shown():
     fetcher = SiteFake({"https://acme.example/": html("Acme Norge", "<p>Acme Norge</p>")})
     case = case_named("ACME NORGE AS")
     web_phase(fetcher, case, {"hjemmeside": "acme.example/home-care/"}, None, max_guesses=0)
-    assert claims(case, "official_website")[0]["value"]["site_scope"] == "registry_declared_shared"
+    assert not claims(case, "official_website") and not claims(case, "registry_declared_website")
     # ... unless the site shows our organisation number
     fetcher = SiteFake({"https://acme.example/": html("Acme Norge", f"<p>Acme Norge AS org.nr {ORG}</p>")})
     case = case_named("ACME NORGE AS")
@@ -663,10 +676,7 @@ def test_site_stating_another_entitys_org_number_is_not_used():
     fetcher = SiteFake({"https://acme.example/": html("Acme Norge", "<footer>Acme Norge – Org.nr. 976 967 631</footer>")})
     case = case_named("ACME NORGE AS")
     web_phase(fetcher, case, {"hjemmeside": "acme.example"}, None, max_guesses=0)
-    assert claims(case, "official_website")[0]["value"]["site_scope"] == "registry_declared_shared"  # declared: kept, read strictly
-    case2 = case_named("ACME NORGE AS")
-    web_phase(fetcher, case2, {"epostadresse": "post@acme.example"}, None, max_guesses=0)
-    assert not claims(case2, "official_website")  # found by the agent itself: another entity's site is not used
+    assert not claims(case, "official_website") and not claims(case, "registry_declared_website")
 
 
 def test_registry_extras_and_forced_liquidation_status():
@@ -684,3 +694,23 @@ def test_registry_extras_and_forced_liquidation_status():
     assert claims(case, "share_capital")[0]["value"]["amount"] == 30000.0
     assert claims(case, "register_memberships")[0]["value"]["vat_register"]["registered"] is True
     assert claims(case, "postal_address")
+
+
+def test_registry_site_showing_our_own_address_is_kept_although_a_namesake_declares_it_too():
+    # hype.no is declared by HYPE MACHINE AS and by HYPE AS (a holding elsewhere); the page shows HYPE MACHINE's own address.
+    other = {"adresse": ["Frakkagjerdvegen 191"], "postnummer": "5563", "poststed": "FØRRESFJORDEN", "land": "Norge"}
+    search = json.dumps({"_embedded": {"enheter": [{"organisasjonsnummer": "921026080", "navn": "HYPE AS", "hjemmeside": "hype.example",
+                                                  "forretningsadresse": other}]}})
+    fetcher = SiteFake({"https://hype.example/": html("Hype", "<footer>Husøyvegen 123 4262 Avaldsnes</footer>", '<meta property="og:site_name" content="Hype">'),
+                        "https://data.brreg.no/enhetsregisteret/api/enheter?navn=hype&size=20": search})
+    case = case_named("HYPE MACHINE AS")
+    case.claim("registered_address", "Husøyvegen 123, 4262 AVALDSNES, Norge", "available", [], section="1")
+    web_phase(fetcher, case, {"hjemmeside": "hype.example"}, None, max_guesses=0)
+    assert claims(case, "official_website")[0]["value"]["url"] == "https://hype.example/"
+    # without our address on the page, the namesake that declares the same site makes it its site
+    fetcher2 = SiteFake({"https://hype.example/": html("Hype", "<p>Hype</p>", '<meta property="og:site_name" content="Hype">'),
+                         "https://data.brreg.no/enhetsregisteret/api/enheter?navn=hype&size=20": search})
+    case2 = case_named("HYPE MACHINE AS")
+    case2.claim("registered_address", "Husøyvegen 123, 4262 AVALDSNES, Norge", "available", [], section="1")
+    web_phase(fetcher2, case2, {"hjemmeside": "hype.example"}, None, max_guesses=0)
+    assert not claims(case2, "official_website")

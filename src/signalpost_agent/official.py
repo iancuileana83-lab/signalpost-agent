@@ -55,6 +55,14 @@ def status_claim_state(response: Response) -> str:
     return "failed"
 
 
+def search_records(fetcher: Fetcher, case: Case, name: str) -> list[dict]:
+    """Registry records whose name resembles `name`; [] when the search fails."""
+    response = fetch(fetcher, case, NAME_SEARCH.format(name=urllib.parse.quote(name)))
+    body = _json(response) if response.status == 200 else None
+    rows = _get(body, "_embedded", "enheter") if isinstance(body, dict) else None
+    return [r for r in rows or [] if isinstance(r, dict) and r.get("navn")]
+
+
 def search_names(fetcher: Fetcher, case: Case, name: str) -> list[tuple[str, str]]:
     """(organisation number, legal name) of registry entities whose name resembles `name`; [] when the search fails."""
     response = fetch(fetcher, case, NAME_SEARCH.format(name=urllib.parse.quote(name)))

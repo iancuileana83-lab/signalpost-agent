@@ -85,17 +85,12 @@ def web_phase(fetcher: Fetcher, case: Case, entity: dict | None, wikidata: dict 
         case.error("website", f"{type(exc).__name__}: {exc}")
         found = None
         case.claim("official_website", None, "failed", [], note="Unexpected error while resolving the website", section="4")
+    _gate_registry_website(case, found)
     have_profiles: set[str] = set()
     if found:
         ctx = found["ctx"]
         outcome["site"] = True
-        steps = [lambda: web.extract_social(case, ctx, name)]
-        if not found.get("shared"):  # brand and description of a group/manager site describe the site owner, not this company
-            steps.insert(0, lambda: web.extract_brand(case, ctx, name))
-        else:
-            case.claim("public_brand", None, "not_available", [], section="1",
-                       note="The registry-declared site may belong to a group or manager; its brand is not attributed to this company")
-        for step in steps:
+        for step in (lambda: web.extract_brand(case, ctx, name), lambda: web.extract_social(case, ctx, name)):
             try:
                 step()
             except Exception as exc:  # noqa: BLE001
@@ -141,6 +136,24 @@ def web_phase(fetcher: Fetcher, case: Case, entity: dict | None, wikidata: dict 
         case.claim("company_profile", None, "not_available", [], key="any",
                    note="No confirmed own website, so no footer to read social links from", section="4")
     return outcome
+
+
+def _gate_registry_website(case: Case, found: dict[str, Any] | None) -> None:
+    """The registry's hjemmeside is published only when the site was confirmed as the company's own. A declared site that is a
+    manager's, parent group's or another brand's (usbl.no, obos.no, orkla.com, privatmegleren.no) is withheld completely."""
+    site = next((c for c in case.claims if c["field"] == "official_website" and c["availability"] == "available"), None)
+    site_host = web.registered_host(urllib.parse.urlsplit(site["value"]["url"]).hostname or "") if site else ""
+    for claim in case.claims:
+        if claim["field"] == "registry_declared_website" and claim["availability"] == "available":
+            declared = web.clean_site_url(str(claim["value"])) or ""
+            if found and found.get("source") == "registry" and web.registered_host(urllib.parse.urlsplit(declared).hostname or "") == site_host:
+                continue  # the declared domain is the verified own site
+            # (a declared address that redirects elsewhere, festivaldrift.no/countryfestivalen, is not published as such:
+            # the verified own site is in official_website)
+            claim.update(value=None, availability="ambiguous", evidence_ids=[],
+                         note="The registry declares a homepage, but it could not be confirmed as this company's own site "
+                              "(it may belong to a manager, parent group or another brand), so it is not published")
+            claim.pop("confidence", None)
 
 
 def _money(value: Any, currency: str | None) -> str:
